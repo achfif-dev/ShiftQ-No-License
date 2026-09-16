@@ -222,6 +222,73 @@ jobs:
         with:
           name: app-release-apk
           path: release-apk
+
+      # TEMUAN (audit ulang): job ini SELALU GAGAL di repo baru yang secrets signing-nya belum
+      # diisi -- build di atas menghasilkan `app-release-unsigned.apk`, dan Android menolak
+      # meng-install APK tanpa tanda tangan sama sekali (INSTALL_PARSE_FAILED_NO_CERTIFICATES),
+      # jadi kegagalannya BUKAN karena app-nya bermasalah. Sebelumnya ini bikin CI merah terus
+      # walau build & unit test hijau, dan bahayanya orang jadi terbiasa mengabaikan CI merah
+      # (alarm fatigue) sampai kegagalan yang SUNGGUHAN ikut terlewat.
+      #
+      # Solusinya BUKAN sekadar men-skip job ini kalau secrets belum ada: justru di kondisi itu
+      # smoke test paling dibutuhkan, karena build release memakai R8 (isMinifyEnabled = true,
+      # lihat app/build.gradle.kts) dan kegagalan khas R8 (class/method di-strip padahal dipakai
+      # lewat refleksi) HANYA muncul di varian release, tidak pernah di debug. Jadi kalau APK-nya
+      # belum ditandatangani, kita tandatangani sendiri di sini pakai keystore SEKALI PAKAI yang
+      # dibuat on-the-fly -- murni supaya bisa di-install ke emulator. Keystore ini TIDAK ADA
+      # hubungannya dengan keystore rilis sungguhan (lihat generate_keystore.yml), tidak pernah
+      # keluar dari runner, dan hilang begitu job selesai.
+      - name: Set up JDK 17 (untuk keytool/apksigner)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Tandatangani APK dengan keystore sekali-pakai (kalau APK masih unsigned)
+        run: |
+          set -euo pipefail
+          APK=$(find release-apk -name "*.apk" | head -n 1)
+          if [ -z "$APK" ]; then
+            echo "::error::Tidak ada file .apk di folder release-apk (download artifact kemungkinan gagal)."
+            ls -la release-apk
+            exit 1
+          fi
+          echo "APK dari artifact: $APK"
+
+          APKSIGNER=$(find /usr/local/lib/android/sdk/build-tools -name apksigner -type f | sort -V | tail -n1)
+          if [ -z "$APKSIGNER" ]; then
+            echo "::error::apksigner tidak ditemukan di Android SDK runner."
+            exit 1
+          fi
+
+          # Sudah bertanda tangan (secrets signing sudah diisi)? Pakai apa adanya -- ini persis
+          # artefak yang nanti dirilis, paling ideal untuk di-smoke-test.
+          if "$APKSIGNER" verify "$APK" > /dev/null 2>&1; then
+            echo "APK sudah ditandatangani (secrets signing terisi) -- dipakai apa adanya."
+            exit 0
+          fi
+
+          echo "APK belum ditandatangani -- menandatangani dengan keystore sekali-pakai untuk keperluan install ke emulator."
+          TMP_PASS=$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 20)
+          keytool -genkeypair -v \
+            -keystore "$RUNNER_TEMP/smoketest.keystore" \
+            -alias smoketest \
+            -keyalg RSA -keysize 2048 -validity 1 \
+            -storepass "$TMP_PASS" \
+            -keypass "$TMP_PASS" \
+            -dname "CN=Smoke Test, OU=CI, O=CI, L=CI, S=CI, C=ID" > /dev/null
+
+          "$APKSIGNER" sign \
+            --ks "$RUNNER_TEMP/smoketest.keystore" \
+            --ks-pass "pass:$TMP_PASS" \
+            --key-pass "pass:$TMP_PASS" \
+            --ks-key-alias smoketest \
+            "$APK"
+
+          rm -f "$RUNNER_TEMP/smoketest.keystore"
+          "$APKSIGNER" verify "$APK"
+          echo "APK berhasil ditandatangani untuk smoke test."
+
       - name: Enable KVM (emulator acceleration)
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
