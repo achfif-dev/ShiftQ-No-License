@@ -1,5 +1,6 @@
 package com.example.posapp.presentation.auth
 
+import android.database.sqlite.SQLiteConstraintException
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.posapp.data.auth.LoginAttemptRepository
@@ -85,56 +86,92 @@ class LoginViewModel @Inject constructor(
             _uiState.value = _uiState.value.copy(errorMessage = "PIN minimal 4 digit")
             return
         }
+        // BUG DITEMUKAN (audit): guard ini HARUS sinkron, di luar coroutine, dan sebelum
+        // launch di bawah. Sebelumnya `isLoading` baru di-set true DI DALAM
+        // viewModelScope.launch, sehingga ada celah waktu (menunggu coroutine dispatch +
+        // minimal 1 frame recomposition Compose) sebelum tombol Konfirmasi di LoginScreen
+        // benar-benar ter-disable. Tap ganda/cepat pada layar setup PIN admin pertama bisa
+        // lolos dua kali, kedua coroutine sama-sama membaca isFirstRun == true dan
+        // sama-sama memanggil createUser("Admin", ...) -> insert kedua kena
+        // SQLiteConstraintException (UNIQUE constraint users.name) yang tidak ditangkap ->
+        // app crash tepat setelah login pertama sukses. Guard di sini menutup race-nya di
+        // sumbernya, bukan cuma di UI.
+        if (_uiState.value.isLoading) return
+        _uiState.value = _uiState.value.copy(isLoading = true)
+
         viewModelScope.launch {
-            // Pembuatan PIN admin pertama BUKAN percobaan menebak PIN yang sudah ada (belum ada
-            // user sama sekali) -- tidak melewati/tidak dihitung ke lockout sama sekali.
-            if (_uiState.value.isFirstRun) {
-                _uiState.value = _uiState.value.copy(isLoading = true)
-                userRepository.createUser("Admin", pin, UserRole.ADMIN)
-                // Ambil kembali entity yang baru dibuat (dengan pinHash yang benar) alih-alih
-                // memakai entity kosong, supaya sesi login konsisten dengan data di database.
-                val createdUser = userRepository.login(pin)
-                if (createdUser != null) {
-                    sessionManager.login(createdUser)
-                    // Admin pertama sudah dibuat -> aktifkan proteksi PIN secara otomatis
-                    // supaya aplikasi benar-benar meminta login di pembukaan berikutnya.
-                    storeProfileRepository.setPinLoginEnabled(true)
+            try {
+                // Pembuatan PIN admin pertama BUKAN percobaan menebak PIN yang sudah ada (belum
+                // ada user sama sekali) -- tidak melewati/tidak dihitung ke lockout sama sekali.
+                if (_uiState.value.isFirstRun) {
+                    userRepository.createUser("Admin", pin, UserRole.ADMIN)
+                    // Ambil kembali entity yang baru dibuat (dengan pinHash yang benar) alih-alih
+                    // memakai entity kosong, supaya sesi login konsisten dengan data di database.
+                    val createdUser = userRepository.login(pin)
+                    if (createdUser != null) {
+                        sessionManager.login(createdUser)
+                        // Admin pertama sudah dibuat -> aktifkan proteksi PIN secara otomatis
+                        // supaya aplikasi benar-benar meminta login di pembukaan berikutnya.
+                        storeProfileRepository.setPinLoginEnabled(true)
+                    }
+                    _uiState.value = _uiState.value.copy(isLoading = false, loginSuccess = true)
+                    return@launch
                 }
-                _uiState.value = _uiState.value.copy(isLoading = false, loginSuccess = true)
-                return@launch
-            }
 
-            // TEMUAN KEAMANAN (audit ulang): sebelumnya tidak ada batas percobaan PIN gagal sama
-            // sekali -- lihat komentar lengkap di LoginAttemptRepository. Cek lockout di SINI
-            // (bukan cuma mengandalkan UI menonaktifkan tombol) supaya tetap fail-closed walau
-            // tombol submit sempat ditekan lewat cara lain (mis. automation/accessibility).
-            val existingLock = loginAttemptRepository.currentLockState()
-            if (existingLock != null) {
-                _uiState.value = _uiState.value.copy(
-                    pin = "",
-                    lockoutSecondsRemaining = existingLock.remainingSeconds,
-                    errorMessage = "Terlalu banyak percobaan gagal. Coba lagi dalam ${existingLock.remainingSeconds} detik."
-                )
-                return@launch
-            }
+                // TEMUAN KEAMANAN (audit ulang): sebelumnya tidak ada batas percobaan PIN gagal
+                // sama sekali -- lihat komentar lengkap di LoginAttemptRepository. Cek lockout di
+                // SINI (bukan cuma mengandalkan UI menonaktifkan tombol) supaya tetap fail-closed
+                // walau tombol submit sempat ditekan lewat cara lain (mis. automation/accessibility).
+                val existingLock = loginAttemptRepository.currentLockState()
+                if (existingLock != null) {
+                    _uiState.value = _uiState.value.copy(
+                        isLoading = false,
+                        pin = "",
+                        lockoutSecondsRemaining = existingLock.remainingSeconds,
+                        errorMessage = "Terlalu banyak percobaan gagal. Coba lagi dalam ${existingLock.remainingSeconds} detik."
+                    )
+                    return@launch
+                }
 
-            _uiState.value = _uiState.value.copy(isLoading = true)
-            val user = userRepository.login(pin)
-            if (user != null) {
-                loginAttemptRepository.recordSuccess()
-                sessionManager.login(user)
-                _uiState.value = _uiState.value.copy(isLoading = false, loginSuccess = true)
-            } else {
-                val newLock = loginAttemptRepository.recordFailure()
+                val user = userRepository.login(pin)
+                if (user != null) {
+                    loginAttemptRepository.recordSuccess()
+                    sessionManager.login(user)
+                    _uiState.value = _uiState.value.copy(isLoading = false, loginSuccess = true)
+                } else {
+                    val newLock = loginAttemptRepository.recordFailure()
+                    _uiState.value = _uiState.value.copy(
+                        isLoading = false,
+                        pin = "",
+                        lockoutSecondsRemaining = newLock?.remainingSeconds ?: 0L,
+                        errorMessage = newLock?.let {
+                            "Terlalu banyak percobaan gagal. Coba lagi dalam ${it.remainingSeconds} detik."
+                        } ?: "PIN salah, coba lagi"
+                    )
+                    if (newLock != null) watchLockout()
+                }
+            } catch (e: SQLiteConstraintException) {
+                // Jaring pengaman tambahan (defense-in-depth), konsisten dengan pola retry di
+                // CheckoutUseCase untuk invoiceNumber: kalau tetap ada insert user yang bentrok
+                // nama (mis. race lain di masa depan, atau restore data ganda), jangan crash --
+                // coba login dulu dengan PIN yang sama (siapa tahu user itu justru sudah
+                // berhasil dibuat oleh percobaan lain), baru tampilkan error kalau memang gagal.
+                val fallbackUser = runCatching { userRepository.login(pin) }.getOrNull()
+                if (fallbackUser != null) {
+                    loginAttemptRepository.recordSuccess()
+                    sessionManager.login(fallbackUser)
+                    _uiState.value = _uiState.value.copy(isLoading = false, loginSuccess = true)
+                } else {
+                    _uiState.value = _uiState.value.copy(
+                        isLoading = false,
+                        errorMessage = "Gagal memproses PIN, coba lagi"
+                    )
+                }
+            } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
-                    pin = "",
-                    lockoutSecondsRemaining = newLock?.remainingSeconds ?: 0L,
-                    errorMessage = newLock?.let {
-                        "Terlalu banyak percobaan gagal. Coba lagi dalam ${it.remainingSeconds} detik."
-                    } ?: "PIN salah, coba lagi"
+                    errorMessage = "Terjadi kesalahan, coba lagi"
                 )
-                if (newLock != null) watchLockout()
             }
         }
     }
