@@ -1,0 +1,43 @@
+# Android / Gradle
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+/build/
+/app/build/
+/captures/
+.externalNativeBuild/
+.cxx/
+.kotlin/
+*.apk
+*.aab
+*.hprof
+*.log
+key.properties
+
+# Kredensial & kunci rahasia — JANGAN PERNAH commit
+service-account.json
+functions/service-account.json
+release-keystore.jks
+keystore-info.txt
+*.keystore
+*.jks
+
+# google-services.json SENGAJA TIDAK di-ignore di sini: build.gradle.kts (app/) mendeteksi
+# keberadaan file ini secara otomatis dan cuma nonaktifkan fitur Cloud Sync/QRIS Otomatis kalau
+# belum ada (build tetap sukses) -- lihat langkah 2-3 FIREBASE_SETUP.md yang memang menyuruh
+# upload file ini langsung ke repo lewat GitHub web UI. Firebase config client-side ini BUKAN
+# rahasia (keamanan datanya ditegakkan firestore.rules di server, bukan dengan menyembunyikan
+# file ini) -- tapi PASTIKAN yang di-upload adalah punya project Firebase proyek INI, bukan
+# project Firebase repo lain (mis. repo app versi lain yang masih pakai project berbeda).
+
+# Node
+node_modules/
+functions/node_modules/
+npm-debug.log*
+
+# Firebase
+.firebase/
+firebase-debug.log
+firestore-debug.log
