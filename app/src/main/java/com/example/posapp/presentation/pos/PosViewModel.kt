@@ -405,29 +405,55 @@ class PosViewModel @Inject constructor(
     }
 
     fun checkout(payments: List<PaymentSplit>, customerId: Long? = null) {
+        // BUG DITEMUKAN (audit): pola RACE CONDITION yang sama persis dengan yang sudah
+        // diperbaiki di LoginViewModel.submit(), tapi di sini dampaknya lebih serius --
+        // ini tombol checkout yang menyentuh UANG & STOK, bukan cuma setup PIN sekali di awal.
+        // Sebelumnya `_isProcessing.value = true` baru di-set DI DALAM viewModelScope.launch,
+        // sehingga ada celah waktu (dispatch coroutine + minimal 1 frame recomposition Compose)
+        // sebelum tombol "Konfirmasi Pembayaran" di PosScreen (enabled = !isProcessing) benar-
+        // benar ter-disable. Tap ganda/cepat pada tombol bayar bisa lolos dua kali: kedua
+        // coroutine sama-sama membaca `uiState.value.cart` (cart yang SAMA, belum sempat
+        // di-clear oleh coroutine pertama) dan sama-sama memanggil checkoutUseCase ->
+        // TERBENTUK DUA TRANSAKSI terpisah dari satu keranjang yang sama (stok dipotong dua
+        // kali, poin loyalitas ditukar dua kali, omzet tercatat dua kali). Guard sinkron di
+        // bawah ini, SEBELUM launch, menutup celah race-nya di sumbernya.
+        if (_isProcessing.value) return
+        _isProcessing.value = true
         viewModelScope.launch {
-            _isProcessing.value = true
-            val cashierName = sessionManager.currentUser.value?.name
-            val actorRole = sessionManager.currentUser.value?.role
-            // Pakai cart dari uiState (SUDAH termasuk potongan promo otomatis, lihat combine di
-            // atas), bukan _cart.value mentah -- supaya nominal yang benar-benar ditagih SAMA
-            // PERSIS dengan yang terakhir dilihat kasir di layar, termasuk promonya.
-            val effectiveCart = uiState.value.cart
-            when (val result = checkoutUseCase(
-                effectiveCart, payments, note = effectiveCart.tableTag, cashierName = cashierName,
-                customerId = customerId, actorRole = actorRole
-            )) {
-                is CheckoutResult.Success -> {
-                    _lastReceipt.value = transactionRepository.getTransactionWithItems(result.transactionId)
-                    _events.emit(PosEvent.CheckoutSuccess(result.transactionId, result.invoiceNumber, result.change))
-                    clearCart()
-                    syncTodaySummaryIfEnabled()
+            try {
+                val cashierName = sessionManager.currentUser.value?.name
+                val actorRole = sessionManager.currentUser.value?.role
+                // Pakai cart dari uiState (SUDAH termasuk potongan promo otomatis, lihat combine
+                // di atas), bukan _cart.value mentah -- supaya nominal yang benar-benar ditagih
+                // SAMA PERSIS dengan yang terakhir dilihat kasir di layar, termasuk promonya.
+                val effectiveCart = uiState.value.cart
+                when (val result = checkoutUseCase(
+                    effectiveCart, payments, note = effectiveCart.tableTag, cashierName = cashierName,
+                    customerId = customerId, actorRole = actorRole
+                )) {
+                    is CheckoutResult.Success -> {
+                        _lastReceipt.value = transactionRepository.getTransactionWithItems(result.transactionId)
+                        _events.emit(PosEvent.CheckoutSuccess(result.transactionId, result.invoiceNumber, result.change))
+                        clearCart()
+                        syncTodaySummaryIfEnabled()
+                    }
+                    is CheckoutResult.Error -> {
+                        _events.emit(PosEvent.ShowMessage(result.message))
+                    }
                 }
-                is CheckoutResult.Error -> {
-                    _events.emit(PosEvent.ShowMessage(result.message))
-                }
+            } catch (e: Exception) {
+                // Jaring pengaman: kalau ada kegagalan tak terduga SETELAH checkoutUseCase
+                // sukses (mis. getTransactionWithItems/syncTodaySummaryIfEnabled) -- transaksi
+                // itu sendiri sudah tersimpan, jadi jangan biarkan keranjang tertinggal dobel di
+                // layar, tapi tetap beri tahu kasir daripada diam-diam gagal.
+                _events.emit(PosEvent.ShowMessage("Terjadi kesalahan setelah transaksi diproses, coba cek Riwayat Penjualan"))
+            } finally {
+                // finally (bukan di akhir try) supaya tombol Konfirmasi Pembayaran PASTI aktif
+                // lagi apa pun yang terjadi di atas -- sebelumnya kalau ada exception tak
+                // terduga di tengah blok ini, isProcessing bisa "nyangkut" true selamanya dan
+                // kasir tidak bisa checkout lagi sama sekali tanpa keluar-masuk layar Kasir.
+                _isProcessing.value = false
             }
-            _isProcessing.value = false
         }
     }
 
