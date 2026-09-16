@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Database Room dikecualikan dari kedua jalur (cloud-backup via akun Google, dan device-transfer
+  lewat kabel/Wi-Fi Direct migrasi HP baru Android 12+) supaya data transaksi/produk tidak diam-
+  diam ikut ter-restore di device lain — restore data toko sepenuhnya lewat fitur Backup & Restore
+  manual di app (lihat data/backup/BackupRepository.kt).
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="database" path="pos_database" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="database" path="pos_database" />
+    </device-transfer>
+</data-extraction-rules>

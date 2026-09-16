@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Database Room dikecualikan dari Android Auto Backup (cloud backup akun Google saat
+  uninstall/reinstall, atau migrasi perangkat "Salin data HP lama") supaya data transaksi/produk
+  tidak diam-diam ikut ter-restore di device lain tanpa sepengetahuan pengguna — restore data
+  toko sepenuhnya lewat fitur Backup & Restore manual di app (lihat data/backup/BackupRepository.kt).
+-->
+<full-backup-content>
+    <exclude domain="database" path="pos_database" />
+</full-backup-content>
