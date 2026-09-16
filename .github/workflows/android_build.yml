@@ -1,1 +1,263 @@
+name: Android CI Build
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch: {}
+# WAJIB: 'contents: write' supaya step "Auto-commit skema Room" bisa git push balik ke repo
+# pakai GITHUB_TOKEN bawaan (default token cuma read-only untuk repo publik).
+permissions:
+  contents: write
+jobs:
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    env:
+      # Didefinisikan di level job (bukan hanya di dalam satu step) supaya bisa dipakai
+      # dengan aman baik di kondisi 'if:' maupun di step lain manapun tanpa hasil yang
+      # tidak konsisten.
+      HAS_RELEASE_SECRETS: ${{ secrets.RELEASE_KEYSTORE_BASE64 != '' && secrets.RELEASE_KEYSTORE_PASSWORD != '' && secrets.RELEASE_KEY_ALIAS != '' && secrets.RELEASE_KEY_PASSWORD != '' }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          # v: FIX build gagal "Warning: Failed to find package 'tools'" / exit code 1.
+          # Default input 'packages' action ini adalah "tools platform-tools", tapi paket
+          # legacy 'tools' (Android SDK Tools) sudah DIHAPUS total dari repository Google
+          # sehingga sdkmanager selalu gagal mencarinya. Kita tidak butuh paket 'tools' itu
+          # sama sekali -- platform & build-tools yang dipakai build ini sudah diinstal
+          # eksplisit di step berikutnya. Jadi cukup minta 'platform-tools' saja.
+          packages: "platform-tools"
+      # v: migrasi target API 36/AGP 9.0 -- pasang eksplisit platform & build-tools yang
+      # dibutuhkan compileSdk=36 (lihat app/build.gradle.kts). AGP BISA auto-download platform
+      # yang belum terpasang, tapi dipasang eksplisit di sini supaya tidak bergantung ke
+      # perilaku auto-download yang kadang gagal diam-diam di tengah proses build.
+      - name: Install Android SDK Platform 36 & Build-Tools 36.0.0
+        run: sdkmanager --install "platforms;android-36" "build-tools;36.0.0" > /dev/null
+      # Repo ini belum menyertakan gradlew/gradle-wrapper.jar (binary) agar tetap ringan
+      # saat diupload manual lewat GitHub web UI. setup-gradle otomatis men-download &
+      # cache Gradle yang sesuai, sehingga 'gradle' bisa dipanggil langsung tanpa wrapper.
+      # Jika kamu sudah generate wrapper (gradle wrapper) di repo, ganti perintah di bawah
+      # menjadi './gradlew ...' dan hapus step setup-gradle ini.
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          # v: migrasi API 36 -- AGP 9.0.1 (lihat root build.gradle.kts) mensyaratkan minimal
+          # Gradle 9.1.0, naik dari 8.7 sebelumnya.
+          gradle-version: '9.1.0'
+      - name: Run Lint
+        run: gradle lintDebug --stacktrace
+      - name: Run Unit Tests
+        run: gradle testDebugUnitTest --stacktrace
+      - name: Build Debug APK
+        run: gradle assembleDebug --stacktrace
 
+      # --- Signing release APK ---
+      # Release APK WAJIB ditandatangani (signed) atau Android akan menolak instalnya sama
+      # sekali ("App not installed"). Keystore disimpan sebagai GitHub Secret dalam bentuk
+      # base64 (RELEASE_KEYSTORE_BASE64), lalu di-decode ke file sementara di runner sebelum
+      # 'gradle assembleRelease' dijalankan. 4 secrets ini WAJIB dibuat di
+      # Settings > Secrets and variables > Actions:
+      #   RELEASE_KEYSTORE_BASE64, RELEASE_KEYSTORE_PASSWORD, RELEASE_KEY_ALIAS, RELEASE_KEY_PASSWORD
+      # Kalau secrets belum diisi, step ini di-skip dan Release APK yang terupload TETAP
+      # UNSIGNED (belum bisa diinstall) — itu tandanya secrets di atas belum kamu buat.
+      - name: Decode release keystore
+        if: ${{ env.HAS_RELEASE_SECRETS == 'true' }}
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+        # 'tr -d' membuang spasi/baris-baru tersembunyi yang kadang ikut ter-copy saat
+        # menyalin nilai base64 ke GitHub Secrets, supaya file .keystore tidak korup.
+        run: |
+          echo "$RELEASE_KEYSTORE_BASE64" | tr -d '[:space:]' | base64 -d > "${{ runner.temp }}/release.keystore"
+
+      # Verifikasi password SEBELUM assembleRelease, supaya kalau salah, errornya jelas
+      # ("password keystore tidak cocok") alih-alih stack trace Gradle yang membingungkan.
+      # Ini juga mendeteksi kalau RELEASE_KEYSTORE_BASE64 tidak sinkron dengan
+      # RELEASE_KEYSTORE_PASSWORD / RELEASE_KEY_ALIAS / RELEASE_KEY_PASSWORD (kasus paling
+      # umum: generate_keystore.yml dijalankan ulang lalu hanya sebagian secret diupdate).
+      - name: Verify release keystore credentials
+        if: ${{ env.HAS_RELEASE_SECRETS == 'true' }}
+        env:
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          # Buang whitespace/newline tersembunyi yang kadang ikut ter-copy saat menyalin
+          # value dari keystore-info.txt ke GitHub Secrets (penyebab paling umum
+          # "keystore password was incorrect" walau password terlihat benar).
+          TRIMMED_STORE_PASS=$(printf '%s' "$RELEASE_KEYSTORE_PASSWORD" | tr -d '[:space:]')
+          TRIMMED_KEY_ALIAS=$(printf '%s' "$RELEASE_KEY_ALIAS" | tr -d '[:space:]')
+          TRIMMED_KEY_PASS=$(printf '%s' "$RELEASE_KEY_PASSWORD" | tr -d '[:space:]')
+          {
+            echo "TRIMMED_STORE_PASS=$TRIMMED_STORE_PASS"
+            echo "TRIMMED_KEY_ALIAS=$TRIMMED_KEY_ALIAS"
+            echo "TRIMMED_KEY_PASS=$TRIMMED_KEY_PASS"
+          } >> "$GITHUB_ENV"
+
+          KEYSTORE="${{ runner.temp }}/release.keystore"
+
+          # 1) Cek RELEASE_KEYSTORE_PASSWORD (storepass) dengan membuka keystore.
+          if ! keytool -list -keystore "$KEYSTORE" -storepass "$TRIMMED_STORE_PASS" > /dev/null 2>&1; then
+            echo "::error::RELEASE_KEYSTORE_PASSWORD tidak cocok dengan release.keystore (gagal membuka keystore)."
+            echo "::error::Perbaikan: update ulang secret RELEASE_KEYSTORE_PASSWORD, pastikan tidak ada"
+            echo "::error::spasi/enter tersembunyi ikut ter-copy dari keystore-info.txt."
+            exit 1
+          fi
+
+          # 2) Cek RELEASE_KEY_ALIAS ada di dalam keystore.
+          if ! keytool -list -keystore "$KEYSTORE" -storepass "$TRIMMED_STORE_PASS" -alias "$TRIMMED_KEY_ALIAS" > /dev/null 2>&1; then
+            echo "::error::RELEASE_KEY_ALIAS ('$TRIMMED_KEY_ALIAS') tidak ditemukan di dalam release.keystore."
+            echo "::error::Perbaikan: cek ulang nilai RELEASE_KEY_ALIAS di keystore-info.txt (biasanya 'posapp')."
+            exit 1
+          fi
+
+          # 3) Cek RELEASE_KEY_PASSWORD.
+          #    PENTING: keytool modern membuat keystore format PKCS12 secara default,
+          #    dan PKCS12 TIDAK punya password terpisah untuk private key -- hanya ada
+          #    SATU password sungguhan (password keystore). Karena itu 'keytool
+          #    -keypasswd' TIDAK didukung sama sekali untuk PKCS12 (akan selalu gagal
+          #    walau password benar, ini bug di versi workflow sebelumnya). Validasi
+          #    yang benar: pastikan RELEASE_KEY_PASSWORD == RELEASE_KEYSTORE_PASSWORD,
+          #    dan pastikan storepass benar-benar bisa mendekripsi private key bag-nya
+          #    lewat openssl (memverifikasi MAC keseluruhan file).
+          if [ "$TRIMMED_KEY_PASS" != "$TRIMMED_STORE_PASS" ]; then
+            echo "::error::RELEASE_KEY_PASSWORD harus SAMA PERSIS dengan RELEASE_KEYSTORE_PASSWORD."
+            echo "::error::Keystore ini format PKCS12, yang tidak punya password key terpisah dari"
+            echo "::error::password keystore. Update secret RELEASE_KEY_PASSWORD supaya nilainya"
+            echo "::error::sama persis dengan RELEASE_KEYSTORE_PASSWORD."
+            exit 1
+          fi
+          if ! openssl pkcs12 -in "$KEYSTORE" -info -noout -passin "pass:$TRIMMED_STORE_PASS" > /dev/null 2>&1 && \
+             ! openssl pkcs12 -in "$KEYSTORE" -info -noout -passin "pass:$TRIMMED_STORE_PASS" -legacy > /dev/null 2>&1; then
+            echo "::error::Gagal mendekripsi release.keystore dengan RELEASE_KEYSTORE_PASSWORD (MAC tidak cocok)."
+            echo "::error::File keystore kemungkinan korup, atau RELEASE_KEYSTORE_BASE64 tidak"
+            echo "::error::berasal dari keystore yang sama dengan password ini."
+            exit 1
+          fi
+          echo "Keystore & password valid, lanjut build release."
+
+      - name: Build Release APK & App Bundle (AAB)
+        if: ${{ env.HAS_RELEASE_SECRETS == 'true' }}
+        env:
+          RELEASE_KEYSTORE_FILE: ${{ runner.temp }}/release.keystore
+          # Pakai TRIMMED_* yang sudah dibersihkan dari whitespace/newline tersembunyi
+          # di step "Verify release keystore credentials" sebelumnya, bukan secret
+          # mentah, supaya konsisten dengan yang sudah divalidasi lolos oleh keytool.
+          RELEASE_KEYSTORE_PASSWORD: ${{ env.TRIMMED_STORE_PASS }}
+          RELEASE_KEY_ALIAS: ${{ env.TRIMMED_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ env.TRIMMED_KEY_PASS }}
+        # bundleRelease -> .aab, format WAJIB untuk upload rilis baru ke Play Console (APK
+        # murni tidak lagi diterima sejak Agustus 2021). assembleRelease (.apk) tetap dibangun
+        # juga -- dipakai job smoke-test di bawah (APK bisa langsung di-install via adb ke
+        # emulator, AAB tidak bisa tanpa bundletool) dan untuk testing manual/sideload cepat.
+        run: gradle assembleRelease bundleRelease --stacktrace
+
+      - name: Build Release APK & App Bundle (unsigned, secrets belum lengkap)
+        if: ${{ env.HAS_RELEASE_SECRETS != 'true' }}
+        run: gradle assembleRelease bundleRelease --stacktrace
+
+      - name: Upload Debug APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload Release APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload Release AAB artifact (untuk upload ke Play Console)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-aab
+          path: app/build/outputs/bundle/release/*.aab
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload Lint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-report
+          path: app/build/reports/lint-results-debug.html
+          if-no-files-found: ignore
+
+      # Room exportSchema=true (AppDatabase.kt) menulis snapshot skema JSON ke app/schemas/
+      # setiap kali build (assembleDebug/assembleRelease di atas sudah men-generate-nya via KSP).
+      # File ini WAJIB ada di repo (Room akan menolak compile kalau versi baru tidak punya
+      # snapshot skema sebelumnya untuk divalidasi), tapi karena kamu tidak punya PC/git lokal
+      # untuk commit manual, step ini auto-commit balik ke branch yang sama kalau ada perubahan.
+      - name: Auto-commit skema Room (app/schemas)
+        if: github.event_name == 'push'
+        run: |
+          if [ -n "$(git status --porcelain app/schemas)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add app/schemas
+            git commit -m "chore: auto-commit skema Room [skip ci]"
+            git push
+          else
+            echo "Tidak ada perubahan skema Room, skip commit."
+          fi
+
+  smoke-test:
+    name: Smoke Test Release APK (Logcat)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Release APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: app-release-apk
+          path: release-apk
+      - name: Enable KVM (emulator acceleration)
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      # Install + buka APK Release di emulator, lalu tangkap logcat — supaya force-close
+      # (mis. akibat R8 men-strip sesuatu yang dibutuhkan saat runtime) ketahuan otomatis
+      # di Actions, tanpa perlu adb/PC lokal.
+      - name: Run emulator, install & open Release APK, capture logcat
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_5
+          # PENTING: android-emulator-runner menjalankan SETIAP BARIS di 'script' sebagai
+          # proses shell terpisah (bukan satu shell session) — variabel biasa (APK=..., dst)
+          # TIDAK bertahan dari satu baris ke baris berikutnya (root cause "adb: filename
+          # doesn't end .apk or .apex" di run 10 Sep). Solusinya: simpan nilai yang perlu
+          # dipakai lintas-baris ke file di /tmp, bukan ke variabel shell biasa.
+          script: |
+            APK=$(find release-apk -name "*.apk" | head -n 1); if [ -z "$APK" ]; then echo "::error::Tidak ada file .apk ditemukan di folder release-apk (download artifact kemungkinan gagal)."; ls -la release-apk; exit 1; fi; echo "$APK" > /tmp/apk_path.txt; echo "APK ditemukan: $APK"
+            APK=$(cat /tmp/apk_path.txt); adb install -r "$APK"
+            adb logcat -c
+            AAPT=$(find /usr/local/lib/android/sdk/build-tools -maxdepth 1 -type d | sort -V | tail -n1)/aapt; if [ ! -x "$AAPT" ]; then AAPT=$(find / -name aapt -type f 2>/dev/null | head -n1); fi; echo "$AAPT" > /tmp/aapt_path.txt; echo "aapt: $AAPT"
+            APK=$(cat /tmp/apk_path.txt); AAPT=$(cat /tmp/aapt_path.txt); "$AAPT" dump badging "$APK" | grep package | awk -F"'" '{print $2}' > /tmp/package.txt; "$AAPT" dump badging "$APK" | grep launchable-activity | awk -F"'" '{print $2}' > /tmp/activity.txt; echo "Package: $(cat /tmp/package.txt) / Activity: $(cat /tmp/activity.txt)"
+            PACKAGE=$(cat /tmp/package.txt); ACTIVITY=$(cat /tmp/activity.txt); if [ -z "$PACKAGE" ] || [ -z "$ACTIVITY" ]; then echo "::error::Gagal membaca package/activity dari aapt (cek log step sebelumnya)."; exit 1; fi; adb shell am start -n "$PACKAGE/$ACTIVITY"
+            sleep 10
+            adb logcat -d > logcat.txt
+            PACKAGE=$(cat /tmp/package.txt); if grep -q "FATAL EXCEPTION" logcat.txt || ! adb shell pidof "$PACKAGE" > /dev/null; then echo "::error::APK Release tampak force-close saat dibuka — cek artifact logcat."; cat logcat.txt; exit 1; fi
+            echo "APK Release berhasil dibuka tanpa force-close."
+      - name: Upload logcat artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apk-logcat
+          path: logcat.txt
+          if-no-files-found: ignore
+          retention-days: 30
