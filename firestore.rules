@@ -1,0 +1,118 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Ringkasan omzet harian per cabang (Fase 4 - Sinkronisasi Cloud dasar). Hanya client yang
+    // sudah sign-in (app ini, lihat TenantAuthProvider.kt) yang boleh baca/tulis — lihat
+    // FIREBASE_SETUP.md.
+    //
+    // TEMUAN KEAMANAN (audit ulang, putaran 1): dulu cuma "request.auth != null" (SEMUA pengguna
+    // app ini dianggap setara, tanpa kepemilikan) — siapa pun bisa menimpa omzet cabang lain
+    // kalau tahu/menebak outletId-nya. Diperbaiki dengan mengunci setiap docId ke ownerUid
+    // pengirim pertama, sama seperti pola di outlet_catalog di bawah.
+    //
+    // TEMUAN KEAMANAN (audit ulang, putaran 3 — kebocoran lintas-pelanggan/cross-tenant): "read:
+    // if request.auth != null" TERNYATA MASIH TERLALU LONGGAR — mengizinkan SIAPA PUN pengguna
+    // app ini (dari toko/pelanggan lain yang tidak terkait sama sekali) membaca omzet toko lain,
+    // karena ownerUid hanya mencegah PENIMPAAN data pelanggan lain, bukan PEMBACAANNYA. Sekarang
+    // read/create/update juga mensyaratkan `customerGroupId` pada dokumen sama dengan custom
+    // claim `customerGroupId` di token pemanggil (di-mint dari kode grup toko oleh Cloud Function
+    // `mintSyncToken` — lihat TenantAuthProvider.kt & functions/index.js), sehingga hanya
+    // cabang-cabang dengan grup toko yang SAMA yang bisa saling melihat. `update`
+    // juga memastikan customerGroupId tidak bisa diubah setelah dibuat, konsisten dengan
+    // ownerUid yang juga immutable.
+    match /outlet_summaries/{docId} {
+      allow read: if request.auth != null
+        && request.auth.token.customerGroupId is string
+        && resource.data.customerGroupId == request.auth.token.customerGroupId;
+      allow create: if request.auth != null
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.auth.token.customerGroupId is string
+        && request.resource.data.customerGroupId == request.auth.token.customerGroupId;
+      allow update: if request.auth != null
+        && resource.data.ownerUid == request.auth.uid
+        && request.auth.token.customerGroupId is string
+        && resource.data.customerGroupId == request.auth.token.customerGroupId
+        && request.resource.data.customerGroupId == resource.data.customerGroupId;
+      allow delete: if false;
+    }
+
+    // Katalog produk/stok per cabang (fitur "Cek Stok Semua Cabang", read-only lintas cabang).
+    // Ditulis oleh app cabang pemilik datanya sendiri (lewat OutletCatalogSyncWorker), dibaca
+    // oleh admin cabang lain di grup pelanggan yang sama lewat OutletCatalogSyncRepository. Tidak
+    // ada data finansial/pribadi di sini (hanya nama produk, SKU, stok, harga jual).
+    //
+    // TEMUAN KEAMANAN (audit ulang, putaran 1): versi sebelumnya cuma mengecek
+    // "request.auth != null" — artinya SIAPA PUN pengguna app ini (semua sign-in anonim yang
+    // sama modelnya) bisa menimpa outletId cabang MANA PUN, bukan cuma miliknya sendiri, kalau
+    // kebetulan tahu/menebak outletId itu. Diperbaiki dengan mengunci setiap outletId ke ownerUid
+    // saat pertama kali dibuat (`create`).
+    //
+    // TEMUAN KEAMANAN (audit ulang, putaran 3 — kebocoran lintas-pelanggan/cross-tenant): rule
+    // read di atas TERNYATA MASIH TERLALU LONGGAR — mengizinkan toko lain (grup toko yang
+    // sama sekali tidak terkait) ikut MEMBACA seluruh katalog+stok+harga toko lain, dan
+    // `listKnownOutlets()` bahkan melakukan `.get()` tanpa filter apa pun ke SELURUH koleksi.
+    // Sekarang read/create/update juga mensyaratkan `customerGroupId` dokumen sama dengan custom
+    // claim `customerGroupId` token pemanggil (lihat penjelasan lengkap & cara mint token di
+    // TenantAuthProvider.kt & functions/index.js `mintSyncToken`); begitu juga rule subkoleksi
+    // `products`, dicek via get() ke dokumen induk yang sama persis dengan pengecekan ownerUid.
+    match /outlet_catalog/{outletId} {
+      allow read: if request.auth != null
+        && request.auth.token.customerGroupId is string
+        && resource.data.customerGroupId == request.auth.token.customerGroupId;
+      allow create: if request.auth != null
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.auth.token.customerGroupId is string
+        && request.resource.data.customerGroupId == request.auth.token.customerGroupId;
+      allow update: if request.auth != null
+        && resource.data.ownerUid == request.auth.uid
+        && request.auth.token.customerGroupId is string
+        && resource.data.customerGroupId == request.auth.token.customerGroupId
+        && request.resource.data.customerGroupId == resource.data.customerGroupId;
+      allow delete: if false;
+      match /products/{sku} {
+        allow read: if request.auth != null
+          && request.auth.token.customerGroupId is string
+          && get(/databases/$(database)/documents/outlet_catalog/$(outletId)).data.customerGroupId
+             == request.auth.token.customerGroupId;
+        allow write: if request.auth != null &&
+          get(/databases/$(database)/documents/outlet_catalog/$(outletId)).data.ownerUid == request.auth.uid &&
+          get(/databases/$(database)/documents/outlet_catalog/$(outletId)).data.customerGroupId
+             == request.auth.token.customerGroupId;
+      }
+    }
+
+    // Status pembayaran QRIS Otomatis (Midtrans) — dibaca REALTIME oleh app kasir untuk deteksi
+    // "Lunas" otomatis. HANYA BOLEH DIBACA, tidak boleh ditulis dari client sama sekali: yang
+    // menulis status pembayaran WAJIB lewat Cloud Function createQrisCharge (status awal) dan
+    // midtransNotification (webhook, pakai Admin SDK yang otomatis melewati rules ini) — kalau
+    // client bisa menulis, siapa pun bisa memalsukan status "SETTLED" tanpa benar-benar membayar.
+    // TEMUAN KEAMANAN (audit ulang, khusus QRIS terkait sinkronisasi/multi-cabang): fitur
+    // Payment Gateway/QRIS Otomatis TERNYATA TIDAK IKUT masuk ke perbaikan lintas-toko yang
+    // sudah diterapkan ke outlet_summaries/outlet_catalog (customerGroupId dari mintSyncToken) --
+    // PaymentGatewayRepository sign-in pakai anonim POLOS (signInAnonymously), bukan lewat
+    // TenantAuthProvider, jadi tidak punya claim customerGroupId sama sekali untuk dipakai di
+    // sini. Sebelumnya rule ini cuma "request.auth != null" (siapa pun yg login anonim dari toko
+    // MANAPUN boleh baca), padahal orderId = "TEMP-<timestamp milidetik>" (lihat PosScreen.kt)
+    // JAUH DARI ACAK -- gampang ditebak/diiterasi dalam rentang waktu jam operasional, artinya
+    // status+nominal transaksi QRIS toko lain bisa dibaca lewat tebak-tebakan order_id. Sekarang
+    // dicocokkan ke ownerUid yang SAMA seperti dipakai gateway_credentials (lihat
+    // createQrisCharge di functions/index.js yang sekarang ikut menulis ownerUid ke dokumen ini)
+    // -- pola ownerUid ini yang memang tersedia di jalur auth anonim-polos ini, konsisten dengan
+    // cara gateway_credentials sudah dilindungi.
+    match /payment_status/{orderId} {
+      allow read: if request.auth != null && resource.data.ownerUid == request.auth.uid;
+      allow write: if false;
+    }
+
+    // Kredensial payment gateway toko — RAHASIA PENUH. Tidak boleh dibaca/ditulis langsung oleh
+    // client sama sekali dalam kondisi apa pun. Satu-satunya jalan masuk/keluar adalah Cloud
+    // Functions (saveGatewayCredentials, createQrisCharge) yang jalan dengan Admin SDK dan
+    // otomatis melewati rules ini. Kalau baris "allow read, write: if false" ini
+    // dihapus/dilonggarkan, siapa pun yang tahu App ID Firebase publik bisa membaca Server Key
+    // Midtrans semua toko.
+    match /gateway_credentials/{outletId} {
+      allow read, write: if false;
+    }
+  }
+}
