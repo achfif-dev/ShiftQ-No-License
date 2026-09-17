@@ -31,10 +31,16 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.text.SimpleDateFormat
 import java.util.Calendar
+import java.util.Date
+import java.util.Locale
 import javax.inject.Inject
 
 enum class ReportRangePreset { TODAY, THIS_WEEK, THIS_MONTH, CUSTOM }
+
+/** Satu titik data grafik tren omzet harian (lihat ReportViewModel.buildDailyTrend). */
+data class DailyTrendPoint(val dateLabel: String, val total: Double)
 
 data class ReportUiState(
     val preset: ReportRangePreset = ReportRangePreset.TODAY,
@@ -45,6 +51,7 @@ data class ReportUiState(
     val netProfit: Double = 0.0, // Laba Bersih = Laba Kotor - Total Beban Usaha — ringkasan khusus Admin
     val topItems: List<TopSellingItem> = emptyList(),
     val transactions: List<TransactionEntity> = emptyList(), // riwayat penjualan periode terpilih
+    val dailyTrend: List<DailyTrendPoint> = emptyList(), // tren omzet harian (grafik), lihat buildDailyTrend()
     val isAdmin: Boolean = false, // HANYA Admin: boleh koreksi harga/qty transaksi & Void — Manager tetap TIDAK termasuk ini
     val canViewExpenses: Boolean = false, // Admin & Manager: boleh lihat Laba Bersih & kelola Beban Usaha
     val isLoading: Boolean = false
@@ -137,15 +144,42 @@ class ReportViewModel @Inject constructor(
             val totalExpenses = if (state.canViewExpenses) {
                 expenseRepository.getTotalForRange(state.startMillis, state.endMillis)
             } else 0.0
+            val dailyTrend = buildDailyTrend(transactions)
             _uiState.value = _uiState.value.copy(
                 summary = summary,
                 topItems = topItems,
                 transactions = transactions,
+                dailyTrend = dailyTrend,
                 totalExpenses = totalExpenses,
                 netProfit = summary.totalGrossProfit - totalExpenses,
                 isLoading = false
             )
         }
+    }
+
+    /**
+     * Kelompokkan transaksi per hari (berdasarkan createdAt) untuk grafik tren omzet harian.
+     * Transaksi VOIDED dikeluarkan, dan returnedAmount dikurangkan dari total — supaya angka
+     * ini konsisten dengan Total Omzet di kartu ringkasan (lihat getSalesSummary).
+     */
+    private fun buildDailyTrend(transactions: List<TransactionEntity>): List<DailyTrendPoint> {
+        val labelFormat = SimpleDateFormat("dd/MM", Locale("id", "ID"))
+        return transactions
+            .filter { it.status != "VOIDED" }
+            .groupBy { tx ->
+                Calendar.getInstance().apply {
+                    timeInMillis = tx.createdAt
+                    set(Calendar.HOUR_OF_DAY, 0)
+                    set(Calendar.MINUTE, 0)
+                    set(Calendar.SECOND, 0)
+                    set(Calendar.MILLISECOND, 0)
+                }.timeInMillis
+            }
+            .toSortedMap()
+            .map { (dayMillis, txsOnDay) ->
+                val netTotal = txsOnDay.sumOf { it.total - it.returnedAmount }
+                DailyTrendPoint(labelFormat.format(Date(dayMillis)), netTotal)
+            }
     }
 
     /** Buka detail satu transaksi dari daftar Riwayat Penjualan (lihat saja untuk Kasir, bisa dikoreksi untuk Admin). */
