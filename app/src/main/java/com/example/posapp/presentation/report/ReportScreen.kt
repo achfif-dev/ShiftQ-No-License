@@ -23,6 +23,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.example.posapp.data.local.entity.PaymentMethod
 import com.example.posapp.data.local.entity.TransactionEntity
@@ -135,6 +141,27 @@ fun ReportScreen(
                     value = "${uiState.summary.totalTransactions}",
                     accent = MaterialTheme.colorScheme.secondary
                 )
+
+                // Fitur (saran audit kompetitif): grafik tren omzet harian, memakai
+                // uiState.dailyTrend yang sudah dihitung di ReportViewModel — supaya pemilik
+                // toko bisa melihat pola (naik/turun, hari ramai) tanpa harus menghitung sendiri
+                // dari daftar transaksi mentah. Cukup Canvas polos (tanpa library chart
+                // tambahan) supaya tidak menambah ukuran APK/dependency baru hanya untuk satu
+                // grafik sederhana ini.
+                if (uiState.dailyTrend.size >= 2) {
+                    Spacer(Modifier.height(16.dp))
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(16.dp)) {
+                            Text("Tren Omzet Harian", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.height(12.dp))
+                            DailyTrendChart(
+                                points = uiState.dailyTrend,
+                                lineColor = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.fillMaxWidth().height(140.dp)
+                            )
+                        }
+                    }
+                }
 
                 if (uiState.canViewExpenses) {
                     Spacer(Modifier.height(16.dp))
@@ -713,6 +740,68 @@ private fun NetProfitRow(
             fontWeight = if (emphasized) FontWeight.Bold else FontWeight.Medium,
             color = valueColor
         )
+    }
+}
+
+/**
+ * Grafik garis sederhana tren omzet harian (v16, saran audit fitur kompetitif) — sengaja
+ * digambar manual lewat Canvas (bukan library chart pihak ketiga) supaya tidak menambah
+ * dependency/ukuran APK hanya untuk satu grafik ringkas ini. [points] diasumsikan sudah
+ * terurut secara kronologis (lihat ReportViewModel.buildDailyTrend).
+ */
+@Composable
+private fun DailyTrendChart(points: List<DailyTrendPoint>, lineColor: Color, modifier: Modifier = Modifier) {
+    if (points.size < 2) return
+    val maxValue = (points.maxOfOrNull { it.total } ?: 0.0).coerceAtLeast(1.0)
+    val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val gridColor = MaterialTheme.colorScheme.outlineVariant
+    Canvas(modifier = modifier) {
+        val leftPad = 4.dp.toPx()
+        val bottomPad = 20.dp.toPx()
+        val chartWidth = size.width - leftPad * 2
+        val chartHeight = size.height - bottomPad
+        val stepX = if (points.size > 1) chartWidth / (points.size - 1) else 0f
+
+        // Garis bantu horizontal (0% dan 100% dari nilai maksimum) supaya ada acuan visual.
+        drawLine(
+            color = gridColor,
+            start = Offset(leftPad, chartHeight),
+            end = Offset(leftPad + chartWidth, chartHeight),
+            strokeWidth = 1.dp.toPx()
+        )
+
+        val offsets = points.mapIndexed { index, point ->
+            val x = leftPad + stepX * index
+            val y = chartHeight - (point.total / maxValue).toFloat() * chartHeight * 0.9f
+            Offset(x, y)
+        }
+
+        for (i in 0 until offsets.size - 1) {
+            drawLine(
+                color = lineColor,
+                start = offsets[i],
+                end = offsets[i + 1],
+                strokeWidth = 2.5.dp.toPx(),
+                cap = androidx.compose.ui.graphics.StrokeCap.Round
+            )
+        }
+        offsets.forEach { offset ->
+            drawCircle(color = lineColor, radius = 3.dp.toPx(), center = offset)
+        }
+
+        // Label tanggal di bawah, hanya titik pertama/tengah/terakhir supaya tidak
+        // berdesakan/tidak terbaca kalau periodenya panjang (mis. 30 hari untuk "Bulan Ini").
+        val labelIndices = setOf(0, points.size / 2, points.size - 1)
+        drawContext.canvas.nativeCanvas.apply {
+            val paint = android.graphics.Paint().apply {
+                color = labelColor.toArgb()
+                textSize = 10.dp.toPx()
+                textAlign = android.graphics.Paint.Align.CENTER
+            }
+            labelIndices.forEach { index ->
+                drawText(points[index].dateLabel, offsets[index].x, size.height, paint)
+            }
+        }
     }
 }
 
