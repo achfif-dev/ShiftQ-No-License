@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 16,
-    "identityHash": "a0271b5a6de6b88043ec3f795748b03a",
+    "identityHash": "f55013f8bcb1d910e6700c0651a03374",
     "entities": [
       {
         "tableName": "products",
@@ -332,6 +332,15 @@
             ],
             "orders": [],
             "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_transactions_invoiceNumber` ON `${TABLE_NAME}` (`invoiceNumber`)"
+          },
+          {
+            "name": "index_transactions_shiftId",
+            "unique": false,
+            "columnNames": [
+              "shiftId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transactions_shiftId` ON `${TABLE_NAME}` (`shiftId`)"
           }
         ],
         "foreignKeys": [
@@ -350,7 +359,7 @@
       },
       {
         "tableName": "transaction_items",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `transactionId` INTEGER NOT NULL, `productId` INTEGER NOT NULL, `variantId` INTEGER, `variantLabelSnapshot` TEXT, `productNameSnapshot` TEXT NOT NULL, `priceSnapshot` REAL NOT NULL, `quantity` INTEGER NOT NULL, `unitSnapshot` TEXT NOT NULL, `itemDiscount` REAL NOT NULL, `itemNote` TEXT, `promoDiscount` REAL NOT NULL, `purchasePriceSnapshot` REAL NOT NULL, FOREIGN KEY(`transactionId`) REFERENCES `transactions`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE , FOREIGN KEY(`productId`) REFERENCES `products`(`id`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `transactionId` INTEGER NOT NULL, `productId` INTEGER NOT NULL, `variantId` INTEGER, `variantLabelSnapshot` TEXT, `productNameSnapshot` TEXT NOT NULL, `priceSnapshot` REAL NOT NULL, `quantity` INTEGER NOT NULL, `unitSnapshot` TEXT NOT NULL, `itemDiscount` REAL NOT NULL, `itemNote` TEXT, `promoDiscount` REAL NOT NULL DEFAULT 0.0, `purchasePriceSnapshot` REAL NOT NULL DEFAULT 0.0, FOREIGN KEY(`transactionId`) REFERENCES `transactions`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE , FOREIGN KEY(`productId`) REFERENCES `products`(`id`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
         "fields": [
           {
             "fieldPath": "id",
@@ -419,13 +428,15 @@
             "fieldPath": "promoDiscount",
             "columnName": "promoDiscount",
             "affinity": "REAL",
-            "notNull": true
+            "notNull": true,
+            "defaultValue": "0.0"
           },
           {
             "fieldPath": "purchasePriceSnapshot",
             "columnName": "purchasePriceSnapshot",
             "affinity": "REAL",
-            "notNull": true
+            "notNull": true,
+            "defaultValue": "0.0"
           }
         ],
         "primaryKey": {
@@ -966,7 +977,7 @@
       },
       {
         "tableName": "debt_payments",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `customerId` INTEGER NOT NULL, `amount` REAL NOT NULL, `note` TEXT, `isCash` INTEGER NOT NULL, `shiftId` INTEGER, `createdAt` INTEGER NOT NULL, FOREIGN KEY(`customerId`) REFERENCES `customers`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `customerId` INTEGER NOT NULL, `amount` REAL NOT NULL, `note` TEXT, `isCash` INTEGER NOT NULL DEFAULT 1, `shiftId` INTEGER, `createdAt` INTEGER NOT NULL, FOREIGN KEY(`customerId`) REFERENCES `customers`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
         "fields": [
           {
             "fieldPath": "id",
@@ -995,7 +1006,8 @@
             "fieldPath": "isCash",
             "columnName": "isCash",
             "affinity": "INTEGER",
-            "notNull": true
+            "notNull": true,
+            "defaultValue": "1"
           },
           {
             "fieldPath": "shiftId",
@@ -1024,6 +1036,15 @@
             ],
             "orders": [],
             "createSql": "CREATE INDEX IF NOT EXISTS `index_debt_payments_customerId` ON `${TABLE_NAME}` (`customerId`)"
+          },
+          {
+            "name": "index_debt_payments_shiftId",
+            "unique": false,
+            "columnNames": [
+              "shiftId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_debt_payments_shiftId` ON `${TABLE_NAME}` (`shiftId`)"
           }
         ],
         "foreignKeys": [
@@ -1112,6 +1133,15 @@
             ],
             "orders": [],
             "createSql": "CREATE INDEX IF NOT EXISTS `index_transaction_returns_transactionId` ON `${TABLE_NAME}` (`transactionId`)"
+          },
+          {
+            "name": "index_transaction_returns_shiftId",
+            "unique": false,
+            "columnNames": [
+              "shiftId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_transaction_returns_shiftId` ON `${TABLE_NAME}` (`shiftId`)"
           }
         ],
         "foreignKeys": [
@@ -1560,7 +1590,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'a0271b5a6de6b88043ec3f795748b03a')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'f55013f8bcb1d910e6700c0651a03374')"
     ]
   }
 }
