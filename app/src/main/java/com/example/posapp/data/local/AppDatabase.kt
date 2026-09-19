@@ -104,7 +104,9 @@ class Converters {
         PromoEntity::class,
         ParkedSaleEntity::class
     ],
-    version = 15, // v15: promos, parked_sales, transaction_payments.dueDate (lihat MIGRATION_14_15)
+    // v16: promoDiscount & purchasePriceSnapshot di transaction_items, shiftId eksplisit di
+    // transactions/transaction_returns/debt_payments + debt_payments.isCash (lihat MIGRATION_15_16).
+    version = 16,
     // exportSchema = true: mulai v10, setiap build menyimpan snapshot skema JSON ke app/schemas/
     // (lihat room.schemaLocation di app/build.gradle.kts). WAJIB commit folder schemas/ ke Git.
     // Ini yang memungkinkan migrasi berikutnya (v10 -> v11, dst.) diuji otomatis dengan
@@ -132,5 +134,10 @@ abstract class AppDatabase : RoomDatabase() {
 
     companion object {
         const val DATABASE_NAME = "pos_database"
+
+        /** HARUS sama dengan `version` di anotasi @Database di atas. Dipakai BackupRepository
+         * untuk menolak restore backup yang dibuat APK lebih baru (yang kalau diteruskan akan
+         * memicu fallbackToDestructiveMigrationOnDowngrade = seluruh data toko terhapus). */
+        const val SCHEMA_VERSION = 16
     }
 }

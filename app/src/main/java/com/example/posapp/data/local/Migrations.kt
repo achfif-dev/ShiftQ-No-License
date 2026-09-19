@@ -249,3 +249,50 @@ val MIGRATION_14_15 = object : Migration(14, 15) {
         db.execSQL("ALTER TABLE transaction_payments ADD COLUMN dueDate INTEGER DEFAULT NULL")
     }
 }
+
+/**
+ * v15 -> v16: perbaikan lapisan UANG (laba/promo/retur/shift) hasil audit.
+ *
+ * 1. `transaction_items.promoDiscount` — potongan promo otomatis per-baris (PromoEngine) yang
+ *    SEBELUMNYA hilang total, tidak pernah ditulis ke database. Kolom baru, bukan digabung ke
+ *    `itemDiscount`, supaya laporan tetap bisa memisahkan diskon manual kasir dari promo
+ *    otomatis. Baris lama = 0.0, yang memang benar (promo baru ada sejak v15 dan nilainya
+ *    tidak pernah tersimpan, jadi tidak ada data lama yang bisa/perlu dipulihkan).
+ * 2. `transaction_items.purchasePriceSnapshot` — harga beli DIBEKUKAN saat transaksi terjadi.
+ *    Sebelumnya laba kotor membaca `products.purchasePrice` yang hidup lewat JOIN, sehingga
+ *    mengubah harga beli hari ini diam-diam mengubah laba bulan-bulan lalu. Baris lama diisi
+ *    dari harga beli produk YANG BERLAKU SAAT MIGRASI DIJALANKAN — perkiraan terbaik yang
+ *    tersedia (persis sama dengan perilaku lama), dan mulai sekarang nilainya berhenti berubah.
+ *    Produk yang sudah dihapus (FK RESTRICT membuat ini praktis mustahil) diisi 0.0.
+ * 3. `transactions.shiftId`, `transaction_returns.shiftId`, `debt_payments.shiftId` +
+ *    `debt_payments.isCash` — keanggotaan shift dicatat EKSPLISIT, bukan lagi disimpulkan dari
+ *    rentang waktu startedAt..endedAt. Ini yang menutup tiga kebocoran rekonsiliasi shift
+ *    sekaligus (refund tunai tidak dikurangkan, pelunasan piutang tunai tidak ditambahkan,
+ *    transaksi di luar shift tidak masuk hitungan mana pun). Baris lama NULL = tidak dimiliki
+ *    shift mana pun; shift lama yang sudah ditutup nilainya tidak diubah sama sekali (angka
+ *    historis yang sudah ditandatangani kasir tidak boleh berubah sendiri gara-gara update app).
+ */
+val MIGRATION_15_16 = object : Migration(15, 16) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE transaction_items ADD COLUMN promoDiscount REAL NOT NULL DEFAULT 0.0")
+        db.execSQL("ALTER TABLE transaction_items ADD COLUMN purchasePriceSnapshot REAL NOT NULL DEFAULT 0.0")
+        db.execSQL(
+            """
+            UPDATE transaction_items
+            SET purchasePriceSnapshot = COALESCE(
+                (SELECT p.purchasePrice FROM products p WHERE p.id = transaction_items.productId), 0.0
+            )
+            """.trimIndent()
+        )
+
+        db.execSQL("ALTER TABLE transactions ADD COLUMN shiftId INTEGER DEFAULT NULL")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_transactions_shiftId ON transactions(shiftId)")
+
+        db.execSQL("ALTER TABLE transaction_returns ADD COLUMN shiftId INTEGER DEFAULT NULL")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_transaction_returns_shiftId ON transaction_returns(shiftId)")
+
+        db.execSQL("ALTER TABLE debt_payments ADD COLUMN isCash INTEGER NOT NULL DEFAULT 1")
+        db.execSQL("ALTER TABLE debt_payments ADD COLUMN shiftId INTEGER DEFAULT NULL")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_debt_payments_shiftId ON debt_payments(shiftId)")
+    }
+}

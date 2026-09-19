@@ -143,6 +143,10 @@ class StoreProfileRepository @Inject constructor(
         val AUTO_LOCK_MINUTES = androidx.datastore.preferences.core.intPreferencesKey("auto_lock_minutes")
         val OUTLET_ID = stringPreferencesKey("outlet_id")
         val SYNC_GROUP_CODE = stringPreferencesKey("sync_group_code")
+        /** v16: rahasia device untuk Cloud Sync — dibuat SERVER saat pendaftaran pertama
+         * deviceId, lalu wajib disertakan di setiap permintaan token berikutnya. Lihat
+         * mintSyncToken di functions/index.js dan TenantAuthProvider. */
+        val SYNC_DEVICE_SECRET = stringPreferencesKey("sync_device_secret")
         val OUTLET_NAME = stringPreferencesKey("outlet_name")
         val CLOUD_SYNC_ENABLED = booleanPreferencesKey("cloud_sync_enabled")
         val SELECTED_PRINTER_NAME = stringPreferencesKey("selected_printer_name")
@@ -291,6 +295,46 @@ class StoreProfileRepository @Inject constructor(
         val newId = java.util.UUID.randomUUID().toString()
         context.storeProfileDataStore.edit { prefs -> prefs[Keys.OUTLET_ID] = newId }
         return newId
+    }
+
+    /**
+     * v16 — perbaikan celah "deviceId dari client menentukan uid" (audit): sebelumnya
+     * mintSyncToken membentuk uid langsung dari deviceId yang dikirim client, sementara deviceId
+     * itu sendiri = outletId yang bisa dibaca anggota grup mana pun lewat outlet_catalog.
+     * Artinya satu anggota grup (atau siapa pun yang tahu kode grup) bisa meminta token dengan
+     * uid cabang lain lalu menimpa katalog/stok/omzet cabang itu — ownerUid jadi tidak berarti.
+     * Sekarang server membuat rahasia acak saat deviceId pertama kali didaftarkan, dan rahasia
+     * itu wajib dibuktikan di permintaan token berikutnya. Disimpan lokal di sini; kalau data
+     * app dihapus, device otomatis mendaftarkan outletId baru (deviceId lama tidak bisa direbut).
+     */
+    suspend fun getSyncDeviceSecret(): String? =
+        context.storeProfileDataStore.data.map { it[Keys.SYNC_DEVICE_SECRET] }.first()?.takeIf { it.isNotBlank() }
+
+    /**
+     * Buat ULANG ID cabang (outletId) device ini beserta rahasia sync-nya (v16).
+     *
+     * Kapan dipakai: data aplikasi pernah dihapus/dipasang ulang sehingga rahasia device hilang,
+     * atau ID cabang lama sudah telanjur "diklaim" instalasi lain. Karena identitas sinkronisasi
+     * sekarang terikat ke pasangan deviceId + rahasia yang didaftarkan server, satu-satunya jalan
+     * pulih mandiri adalah memakai deviceId baru — tanpa ini pemilik toko harus menghubungi
+     * developer, persis masalah dukungan yang ingin dihilangkan.
+     *
+     * KONSEKUENSI yang harus diberitahukan ke pengguna sebelum menekan tombolnya: dokumen
+     * ringkasan/katalog cabang LAMA di cloud tidak akan ikut berpindah (ownerUid-nya beda), jadi
+     * cabang ini akan muncul sebagai entri baru di Ringkasan Semua Cabang sampai entri lama
+     * kedaluwarsa/ dihapus. Data lokal (produk, transaksi, stok) TIDAK tersentuh sama sekali.
+     */
+    suspend fun regenerateOutletId(): String {
+        val newId = java.util.UUID.randomUUID().toString()
+        context.storeProfileDataStore.edit { prefs ->
+            prefs[Keys.OUTLET_ID] = newId
+            prefs.remove(Keys.SYNC_DEVICE_SECRET)
+        }
+        return newId
+    }
+
+    suspend fun setSyncDeviceSecret(secret: String) {
+        context.storeProfileDataStore.edit { prefs -> prefs[Keys.SYNC_DEVICE_SECRET] = secret }
     }
 
     suspend fun updateOutletName(name: String) {

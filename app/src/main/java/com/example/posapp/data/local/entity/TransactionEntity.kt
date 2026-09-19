@@ -33,6 +33,13 @@ data class TransactionEntity(
     val note: String? = null,
     val cashierName: String? = null, // snapshot nama kasir yang login saat transaksi (fitur multi-user)
     val customerId: Long? = null,    // diisi bila transaksi ini terhubung ke pelanggan (wajib untuk BON)
+    // v16: shift kasir yang sedang AKTIF saat transaksi ini dibuat (null = checkout terjadi
+    // tanpa shift terbuka sama sekali, atau transaksi lama dari sebelum v16). Sebelumnya
+    // rekonsiliasi shift hanya mengandalkan rentang waktu startedAt..endedAt — transaksi yang
+    // terjadi saat tidak ada shift aktif tidak pernah masuk hitungan shift mana pun, dan
+    // transaksi shift lain yang waktunya bersinggungan (jam device diubah, shift lupa ditutup)
+    // bisa ikut terhitung. Sekarang keanggotaan shift tercatat eksplisit per transaksi.
+    val shiftId: Long? = null,
     val createdAt: Long = System.currentTimeMillis(),
     val editedByName: String? = null, // nama Admin terakhir yang mengoreksi transaksi ini (audit trail)
     val editedAt: Long? = null,
@@ -77,10 +84,26 @@ data class TransactionItemEntity(
     val quantity: Int,
     val unitSnapshot: String = "pcs", // snapshot satuan produk saat transaksi (pcs/kg/liter/dus/dll)
     val itemDiscount: Double = 0.0,
-    val itemNote: String? = null
+    val itemNote: String? = null,
+    // v16 — BUG KRITIS SEBELUMNYA: potongan promo otomatis per-baris (PromoEngine, lihat
+    // CartLine.promoDiscount) sama sekali TIDAK PERNAH tersimpan ke database. Akibatnya
+    // Σ(item) tidak sama dengan transactions.total, laba kotor kelebihan hitung sebesar nilai
+    // promo, struk yang dicetak ulang dari riwayat salah nominal, dan retur bisa me-refund
+    // lebih besar dari yang benar-benar dibayar pelanggan. Disimpan di kolom SENDIRI (bukan
+    // digabung ke itemDiscount) supaya laporan tetap bisa membedakan potongan yang diberikan
+    // kasir secara manual dari potongan yang otomatis dari aturan promo.
+    val promoDiscount: Double = 0.0,
+    // v16 — BUG AKUNTANSI SEBELUMNYA: laba kotor di-JOIN ke products.purchasePrice yang HIDUP,
+    // jadi begitu Admin memperbarui harga beli, laba bulan-bulan yang sudah lewat ikut berubah
+    // sendiri. Snapshot ini membekukan harga beli PADA SAAT transaksi terjadi, sama seperti
+    // priceSnapshot membekukan harga jual. Baris lama hasil migrasi diisi dari harga beli yang
+    // berlaku saat migrasi dijalankan (perkiraan terbaik yang tersedia — lihat MIGRATION_15_16).
+    val purchasePriceSnapshot: Double = 0.0
 ) {
+    /** Nilai bersih baris ini SEPERTI YANG DIBAYAR pelanggan — sudah dikurangi diskon manual
+     * per-baris DAN potongan promo otomatis per-baris. */
     val lineTotal: Double
-        get() = (priceSnapshot * quantity) - itemDiscount
+        get() = ((priceSnapshot * quantity) - itemDiscount - promoDiscount).coerceAtLeast(0.0)
 }
 
 /** Rincian per-metode pembayaran untuk satu transaksi (mendukung split/multi-pembayaran). */

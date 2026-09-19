@@ -140,6 +140,25 @@ class PaymentGatewayRepository @Inject constructor(
         }
     }
 
+    /**
+     * Tempelkan nomor invoice final ke dokumen payment_status milik [orderId] (v16). Dipanggil
+     * SETELAH checkout berhasil — sebelum ini, orderId QRIS Otomatis (`TEMP-<millis>-<rand>`)
+     * sama sekali tidak terhubung ke invoice mana pun, sehingga mencocokkan dashboard Midtrans
+     * dengan Riwayat Penjualan harus dikerjakan manual berdasarkan jam & nominal.
+     *
+     * SENGAJA fail-soft (tidak melempar, tidak mengembalikan error ke pemanggil): transaksi
+     * sudah tersimpan di database lokal dan uang sudah diterima — kegagalan penempelan label ini
+     * tidak boleh mengganggu kasir sama sekali.
+     */
+    suspend fun attachInvoice(orderId: String, invoiceNumber: String) {
+        runCatching {
+            if (!ensureSignedIn()) return
+            functions.getHttpsCallable("attachInvoiceToOrder")
+                .call(hashMapOf("orderId" to orderId, "invoiceNumber" to invoiceNumber))
+                .await()
+        }
+    }
+
     /** Dengarkan status pembayaran realtime dari dokumen yang ditulis webhook Midtrans lewat
      * Cloud Function `midtransNotification` — bukan polling, murni Firestore snapshot listener. */
     fun observeChargeStatus(orderId: String): Flow<QrisChargeStatus> = callbackFlow {

@@ -4,6 +4,7 @@ import androidx.room.withTransaction
 import com.example.posapp.data.local.AppDatabase
 import com.example.posapp.data.local.dao.DailySalesSummary
 import com.example.posapp.data.local.dao.ProductDao
+import com.example.posapp.data.local.dao.ShiftDao
 import com.example.posapp.data.local.dao.ProductVariantDao
 import com.example.posapp.data.local.dao.TopSellingItem
 import com.example.posapp.data.local.dao.TransactionDao
@@ -45,7 +46,10 @@ class TransactionRepository @Inject constructor(
     private val appDatabase: AppDatabase,
     private val transactionDao: TransactionDao,
     private val productDao: ProductDao,
-    private val productVariantDao: ProductVariantDao
+    private val productVariantDao: ProductVariantDao,
+    /** v16: dipakai untuk menandai retur/void dengan shift yang sedang aktif, supaya refund
+     * tunai bisa dikurangkan dari "kas seharusnya" saat tutup shift. */
+    private val shiftDao: ShiftDao
 ) {
     fun observeAll(): Flow<List<TransactionEntity>> = transactionDao.observeAll()
 
@@ -197,15 +201,23 @@ class TransactionRepository @Inject constructor(
         }
         val items = transactionDao.getItems(transactionId)
         items.forEach { item ->
+            // BUG SEBELUMNYA (stok dobel): void mengembalikan stok SELURUH item, termasuk item
+            // yang barangnya sudah kembali ke rak lewat processReturn(restocked = true). Satu
+            // barang fisik jadi tercatat dua kali di stok. Sekarang qty yang sudah direstock
+            // dikurangi dulu; sisanya saja yang dikembalikan.
+            val alreadyRestocked = transactionDao.getRestockedQuantityForItem(item.id)
+            val qtyToRestore = (item.quantity - alreadyRestocked).coerceAtLeast(0)
+            if (qtyToRestore == 0) return@forEach
             if (item.variantId != null) {
-                productVariantDao.increaseStock(item.variantId, item.quantity)
+                productVariantDao.increaseStock(item.variantId, qtyToRestore)
             } else {
-                productDao.increaseStock(item.productId, item.quantity)
+                productDao.increaseStock(item.productId, qtyToRestore)
             }
         }
         transactionDao.insertReturn(
             TransactionReturnEntity(
                 transactionId = transactionId,
+                shiftId = shiftDao.getActiveShift()?.id,
                 isVoid = true,
                 reason = reason,
                 // Kalau sebelumnya sudah ada retur sebagian (returnedAmount > 0), void cuma
@@ -244,11 +256,27 @@ class TransactionRepository @Inject constructor(
         if (items.isEmpty()) {
             throw ReturnValidationException("Pilih minimal 1 item yang diretur")
         }
+        // BUG SEBELUMNYA: qty retur divalidasi, NOMINAL refund tidak sama sekali — nominal apa
+        // pun diterima apa adanya lalu ditambahkan ke returnedAmount. Akibatnya toko bisa
+        // mengembalikan uang LEBIH BESAR dari yang pernah dibayar pelanggan, dan penjualan
+        // bersih di Laporan (total - returnedAmount) bisa jadi NEGATIF tanpa ada yang menahan.
+        if (refundAmount < 0) {
+            throw ReturnValidationException("Nominal refund tidak boleh negatif")
+        }
+        val maxRefundable = (transaction.total - transaction.returnedAmount).coerceAtLeast(0.0)
+        // Toleransi 1 rupiah untuk pembulatan ganda (harga pecahan/prorata diskon), bukan
+        // kelonggaran kebijakan.
+        if (refundAmount > maxRefundable + 1.0) {
+            throw ReturnValidationException(
+                "Nominal refund melebihi sisa yang bisa dikembalikan (maks Rp${maxRefundable.toLong()})"
+            )
+        }
         val originalItems = transactionDao.getItems(transactionId).associateBy { it.id }
 
         val returnId = transactionDao.insertReturn(
             TransactionReturnEntity(
                 transactionId = transactionId,
+                shiftId = shiftDao.getActiveShift()?.id,
                 isVoid = false,
                 reason = reason,
                 refundAmount = refundAmount,

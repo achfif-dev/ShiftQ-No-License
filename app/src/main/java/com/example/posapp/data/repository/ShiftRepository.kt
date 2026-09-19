@@ -1,6 +1,7 @@
 package com.example.posapp.data.repository
 
 import com.example.posapp.data.local.dao.CashMovementDao
+import com.example.posapp.data.local.dao.CustomerDao
 import com.example.posapp.data.local.dao.ShiftDao
 import com.example.posapp.data.local.dao.TransactionDao
 import com.example.posapp.data.local.entity.CashMovementEntity
@@ -44,7 +45,17 @@ data class ShiftPaymentBreakdown(
     val debitCredit: Double,
     val bon: Double,
     val cashInFromMovements: Double,
-    val cashOutFromMovements: Double
+    val cashOutFromMovements: Double,
+    /** v16: refund TUNAI (retur/void) yang keluar dari laci selama shift ini — MENGURANGI kas
+     * seharusnya. Sebelumnya tidak pernah dihitung sama sekali. */
+    val cashRefunds: Double = 0.0,
+    /** v16: pelunasan piutang (BON) yang diterima TUNAI selama shift ini — MENAMBAH kas
+     * seharusnya. Sebelumnya tidak pernah dihitung sama sekali. */
+    val cashDebtPayments: Double = 0.0,
+    /** v16: jumlah transaksi yang terjadi dalam rentang waktu shift ini TAPI tercatat tanpa
+     * shift (kasir lupa buka shift). TIDAK ikut dihitung ke kas — murni peringatan supaya
+     * selisih yang muncul tidak dikira kecurangan kasir. */
+    val transactionsWithoutShift: Int = 0
 )
 
 @Singleton
@@ -52,6 +63,7 @@ class ShiftRepository @Inject constructor(
     private val shiftDao: ShiftDao,
     private val transactionDao: TransactionDao,
     private val cashMovementDao: CashMovementDao,
+    private val customerDao: CustomerDao,
     private val auditLogRepository: AuditLogRepository
 ) {
     fun observeActiveShift(): Flow<ShiftEntity?> = shiftDao.observeActiveShift()
@@ -149,10 +161,14 @@ class ShiftRepository @Inject constructor(
 
         val endedAt = System.currentTimeMillis()
 
-        val cashRows = transactionDao.getCashPaymentsWithChangeInRange(active.startedAt, endedAt)
+        // v16: SEMUA agregat di bawah berbasis shiftId EKSPLISIT, bukan rentang waktu
+        // startedAt..endedAt seperti sebelumnya. Rentang waktu membuat transaksi yang dibuat saat
+        // tidak ada shift terbuka ikut/tidak ikut terhitung secara tidak terduga, dan membuat
+        // hasil rekonsiliasi berubah kalau jam device digeser.
+        val cashRows = transactionDao.getCashPaymentsWithChangeForShift(active.id)
         val netCashSales = cashRows.sumOf { (it.cashAmount - it.changeAmount).coerceAtLeast(0.0) }
 
-        val methodTotals = transactionDao.getPaymentMethodTotalsInRange(active.startedAt, endedAt)
+        val methodTotals = transactionDao.getPaymentMethodTotalsForShift(active.id)
         val qris = methodTotals.firstOrNull { it.method == PaymentMethod.QRIS }?.total ?: 0.0
         val debitCredit = methodTotals.firstOrNull { it.method == PaymentMethod.DEBIT_CREDIT }?.total ?: 0.0
         val bon = methodTotals.firstOrNull { it.method == PaymentMethod.BON }?.total ?: 0.0
@@ -160,7 +176,19 @@ class ShiftRepository @Inject constructor(
         val cashIn = cashMovementDao.getMovementTotal(active.id, CashMovementType.IN)
         val cashOut = cashMovementDao.getMovementTotal(active.id, CashMovementType.OUT)
 
-        val expectedCash = active.startCash + netCashSales + cashIn - cashOut
+        // Dua aliran kas yang SEBELUMNYA bocor total dari rekonsiliasi:
+        // (a) refund tunai dari retur/void — uang fisik keluar laci, tapi tidak pernah dikurangkan;
+        // (b) pelunasan piutang BON yang diterima tunai — uang fisik masuk laci, tapi tidak pernah
+        //     ditambahkan (BON sengaja TIDAK menambah kas saat transaksinya terjadi, jadi satu-
+        //     satunya tempat uang itu boleh diakui memang di sini).
+        val cashRefunds = transactionDao.getCashRefundTotalForShift(active.id)
+        val cashDebtPayments = customerDao.getCashDebtPaymentTotalForShift(active.id)
+
+        // Peringatan, bukan koreksi: transaksi tanpa shift tidak dipaksa masuk ke shift ini.
+        val orphanTransactions = transactionDao.countTransactionsWithoutShift(active.startedAt, endedAt)
+
+        val expectedCash =
+            active.startCash + netCashSales + cashIn + cashDebtPayments - cashOut - cashRefunds
         val difference = actualCash - expectedCash
 
         shiftDao.update(
@@ -190,7 +218,10 @@ class ShiftRepository @Inject constructor(
                 debitCredit = debitCredit,
                 bon = bon,
                 cashInFromMovements = cashIn,
-                cashOutFromMovements = cashOut
+                cashOutFromMovements = cashOut,
+                cashRefunds = cashRefunds,
+                cashDebtPayments = cashDebtPayments,
+                transactionsWithoutShift = orphanTransactions
             )
         )
     }

@@ -5,7 +5,6 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.security.SecureRandom
 import javax.crypto.Cipher
-import javax.crypto.CipherInputStream
 import javax.crypto.CipherOutputStream
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
@@ -47,7 +46,7 @@ object BackupCrypto {
         return try {
             FileInputStream(file).use { input ->
                 val header = ByteArray(MAGIC.size)
-                input.read(header) == MAGIC.size && header.contentEquals(MAGIC)
+                input.readFully(header) && header.contentEquals(MAGIC)
             }
         } catch (e: Exception) {
             false
@@ -79,29 +78,65 @@ object BackupCrypto {
         }
     }
 
-    /** @throws WrongPasswordException jika password salah atau file bukan .posbak yang valid. */
+    /**
+     * @throws WrongPasswordException jika password salah atau file bukan .posbak yang valid.
+     *
+     * PERBAIKAN PENTING (audit): versi sebelumnya memakai [javax.crypto.CipherInputStream].
+     * Pada mode GCM, perilaku CipherInputStream saat tag autentikasi TIDAK cocok BERBEDA antara
+     * JVM desktop (tempat unit test dijalankan — di situ exception dilempar, jadi test lolos) dan
+     * beberapa versi runtime Android, yang pada kasus tertentu hanya MEMOTONG stream tanpa
+     * melempar exception sama sekali. Akibat nyatanya fatal: password salah menghasilkan file
+     * "berhasil" berisi sampah, lalu BackupRepository.restore menimpa database asli dengan
+     * sampah itu. Sekarang dekripsi memakai `cipher.doFinal()` eksplisit di atas buffer —
+     * satu-satunya cara yang DIJAMIN melempar AEADBadTagException kalau tag tidak cocok.
+     *
+     * Konsekuensi yang disengaja: seluruh isi backup dibaca ke memori sekali jalan sebelum
+     * ditulis. Untuk database POS satu toko (puluhan MB paling banyak) ini wajar, dan
+     * keamanannya jauh lebih penting daripada hemat memori di jalur yang dijalankan sekali
+     * seumur restore. Kalau suatu saat ukuran DB benar-benar besar, ganti ke pemrosesan
+     * per-chunk dengan `cipher.update()` + satu `cipher.doFinal()` di akhir — TETAP jangan
+     * kembali ke CipherInputStream.
+     */
     fun decrypt(source: File, destination: File, password: String) {
+        val payload: ByteArray
+        val salt = ByteArray(SALT_LENGTH)
+        val iv = ByteArray(IV_LENGTH)
         FileInputStream(source).use { input ->
             val header = ByteArray(MAGIC.size)
-            if (input.read(header) != MAGIC.size || !header.contentEquals(MAGIC)) {
+            if (!input.readFully(header) || !header.contentEquals(MAGIC)) {
                 throw WrongPasswordException()
             }
-            val salt = ByteArray(SALT_LENGTH)
-            val iv = ByteArray(IV_LENGTH)
-            if (input.read(salt) != SALT_LENGTH || input.read(iv) != IV_LENGTH) {
+            // readFully, bukan read(): InputStream.read(byte[]) BOLEH mengembalikan lebih sedikit
+            // byte dari kapasitas buffer tanpa berarti file rusak. Versi lama menganggap hasil
+            // baca pendek = file tidak valid (dan sebaliknya bisa memakai salt/IV yang belum
+            // terisi penuh) — latent bug yang muncul tidak menentu tergantung sumber file.
+            if (!input.readFully(salt) || !input.readFully(iv)) {
                 throw WrongPasswordException()
             }
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            try {
-                cipher.init(Cipher.DECRYPT_MODE, deriveKey(password, salt), GCMParameterSpec(GCM_TAG_BITS, iv))
-                CipherInputStream(input, cipher).use { cipherIn ->
-                    FileOutputStream(destination).use { output -> cipherIn.copyTo(output) }
-                }
-            } catch (e: Exception) {
-                // AEADBadTagException (tag GCM tidak cocok) = password salah ATAU file rusak.
-                destination.delete()
-                throw WrongPasswordException()
-            }
+            payload = input.readBytes()
         }
+
+        val plain = try {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, deriveKey(password, salt), GCMParameterSpec(GCM_TAG_BITS, iv))
+            cipher.doFinal(payload)
+        } catch (e: Exception) {
+            // AEADBadTagException (tag GCM tidak cocok) = password salah ATAU file rusak.
+            destination.delete()
+            throw WrongPasswordException()
+        }
+
+        FileOutputStream(destination).use { output -> output.write(plain) }
+    }
+
+    /** Baca tepat sebanyak kapasitas [buffer]; false kalau file habis lebih dulu. */
+    private fun java.io.InputStream.readFully(buffer: ByteArray): Boolean {
+        var offset = 0
+        while (offset < buffer.size) {
+            val read = read(buffer, offset, buffer.size - offset)
+            if (read < 0) return false
+            offset += read
+        }
+        return true
     }
 }

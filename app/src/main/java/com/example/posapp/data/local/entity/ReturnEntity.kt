@@ -41,6 +41,11 @@ data class TransactionReturnEntity(
     val refundAmount: Double,       // nominal yang dikembalikan ke pelanggan
     val refundMethod: String? = null, // snapshot nama PaymentMethod (CASH/DEBIT_CREDIT/QRIS/dst.) — boleh beda dari metode bayar asal, mis. bayar QRIS tapi refund tunai. Disimpan String biasa (bukan tipe PaymentMethod) supaya tidak perlu TypeConverter nullable baru.
     val processedByName: String,     // audit: siapa yang memproses retur/void ini
+    /** v16: shift yang sedang aktif saat retur/void ini diproses (null = tidak ada shift
+     * terbuka, atau baris lama sebelum v16). Dipakai ShiftRepository.closeShift untuk
+     * MENGURANGI refund tunai dari "kas seharusnya" — sebelumnya refund tunai keluar dari laci
+     * tanpa pernah dikurangkan sama sekali, sehingga shift selalu tampak kekurangan kas. */
+    val shiftId: Long? = null,
     val createdAt: Long = System.currentTimeMillis()
 )
 

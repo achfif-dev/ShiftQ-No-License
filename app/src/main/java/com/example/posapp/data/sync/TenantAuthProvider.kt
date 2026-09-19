@@ -102,11 +102,24 @@ class TenantAuthProvider @Inject constructor(
 
         val deviceId = storeProfileRepository.ensureOutletId() // ID stabil per instalasi, sudah ada untuk keperluan Cloud Sync lain
         return try {
-            val data = hashMapOf("groupCode" to groupCode, "deviceId" to deviceId)
+            // v16 (audit — pemalsuan identitas cabang lain): deviceId SAJA tidak lagi cukup untuk
+            // mendapatkan token. Server mendaftarkan deviceId pada permintaan PERTAMA dan
+            // mengembalikan rahasia acak yang disimpan lokal; permintaan berikutnya wajib
+            // membuktikan rahasia itu. Sebelumnya uid dibentuk langsung dari deviceId kiriman
+            // client — dan deviceId = outletId yang bisa dibaca anggota grup mana pun lewat
+            // outlet_catalog, sehingga satu cabang bisa menimpa data cabang lain.
+            val storedSecret = storeProfileRepository.getSyncDeviceSecret()
+            val data = hashMapOf(
+                "groupCode" to groupCode,
+                "deviceId" to deviceId,
+                "deviceSecret" to (storedSecret ?: "")
+            )
             val result = functions.getHttpsCallable("mintSyncToken").call(data).await()
             @Suppress("UNCHECKED_CAST")
             val map = result.data as? Map<String, Any?> ?: return null
             val customToken = map["customToken"] as? String ?: return null
+            (map["deviceSecret"] as? String)?.takeIf { it.isNotBlank() && it != storedSecret }
+                ?.let { storeProfileRepository.setSyncDeviceSecret(it) }
             val authResult = auth.signInWithCustomToken(customToken).await()
             val uid = authResult.user?.uid ?: return null
             cachedGroupId = groupId

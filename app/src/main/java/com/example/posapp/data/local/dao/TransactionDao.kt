@@ -88,6 +88,66 @@ interface TransactionDao {
     @Query("SELECT COALESCE(SUM(quantityReturned), 0) FROM transaction_return_items WHERE transactionItemId = :transactionItemId")
     suspend fun getReturnedQuantityForItem(transactionItemId: Long): Int
 
+    // v16: qty yang sudah diretur DAN benar-benar dikembalikan ke stok (restocked = 1) untuk
+    // satu baris item. Dipakai voidTransaction supaya stok tidak dikembalikan DUA KALI untuk
+    // barang yang sudah masuk lagi lewat retur sebagian sebelumnya — lihat TransactionRepository.
+    @Query(
+        """
+        SELECT COALESCE(SUM(quantityReturned), 0) FROM transaction_return_items
+        WHERE transactionItemId = :transactionItemId AND restocked = 1
+        """
+    )
+    suspend fun getRestockedQuantityForItem(transactionItemId: Long): Int
+
+    // ===== Rekonsiliasi shift (v16) — berbasis shiftId EKSPLISIT, bukan rentang waktu =====
+
+    /** Baris CASH per-transaksi milik SATU shift (bukan rentang waktu). Transaksi yang dibuat
+     * saat tidak ada shift terbuka punya shiftId NULL dan sengaja tidak masuk ke shift mana pun. */
+    @Query(
+        """
+        SELECT t.id AS transactionId,
+               COALESCE(SUM(tp.amount), 0) AS cashAmount,
+               t.changeAmount AS changeAmount
+        FROM transactions t
+        JOIN transaction_payments tp ON tp.transactionId = t.id AND tp.method = 'CASH'
+        WHERE t.shiftId = :shiftId AND t.status != 'VOIDED'
+        GROUP BY t.id
+        """
+    )
+    suspend fun getCashPaymentsWithChangeForShift(shiftId: Long): List<CashTransactionAmount>
+
+    @Query(
+        """
+        SELECT tp.method AS method, COALESCE(SUM(tp.amount), 0) AS total
+        FROM transaction_payments tp
+        JOIN transactions t ON t.id = tp.transactionId
+        WHERE t.shiftId = :shiftId AND t.status != 'VOIDED'
+        GROUP BY tp.method
+        """
+    )
+    suspend fun getPaymentMethodTotalsForShift(shiftId: Long): List<PaymentMethodTotal>
+
+    /** Total refund TUNAI yang keluar dari laci selama satu shift (retur maupun void yang
+     * refund-nya tunai). Sebelumnya uang ini keluar tanpa pernah dikurangkan dari "kas
+     * seharusnya", sehingga kasir yang bekerja benar selalu tampak kekurangan kas. */
+    @Query(
+        """
+        SELECT COALESCE(SUM(refundAmount), 0) FROM transaction_returns
+        WHERE shiftId = :shiftId AND refundMethod = 'CASH'
+        """
+    )
+    suspend fun getCashRefundTotalForShift(shiftId: Long): Double
+
+    /** Jumlah transaksi yang tercatat TANPA shift (shiftId NULL) dalam rentang waktu shift ini.
+     * Murni untuk peringatan di layar tutup shift — angkanya TIDAK ikut dihitung ke kas. */
+    @Query(
+        """
+        SELECT COUNT(*) FROM transactions
+        WHERE shiftId IS NULL AND status != 'VOIDED' AND createdAt BETWEEN :start AND :end
+        """
+    )
+    suspend fun countTransactionsWithoutShift(start: Long, end: Long): Int
+
     @Query("UPDATE transactions SET returnedAmount = returnedAmount + :amount WHERE id = :id")
     suspend fun addReturnedAmount(id: Long, amount: Double)
 
@@ -117,27 +177,43 @@ interface TransactionDao {
     @Query("SELECT * FROM transaction_items WHERE transactionId = :transactionId")
     suspend fun getItems(transactionId: Long): List<TransactionItemEntity>
 
-    // Laba kotor = SUM((priceSnapshot - purchasePrice) * qty) - itemDiscount
-    // PERBAIKAN: query lama menggabungkan SUM(t.total) dalam SATU SELECT yang sudah di-JOIN ke
-    // transaction_items — akibatnya t.total ikut terhitung BERULANG sebanyak jumlah item di
-    // transaksi itu (transaksi dengan 3 item, total-nya kehitung 3x di totalRevenue). Sekarang
-    // totalRevenue & totalTransactions dihitung dari subquery terpisah yang cuma baca tabel
-    // transactions sendiri, sehingga tidak ikut kelipatan oleh JOIN. totalGrossProfit tetap dari
-    // subquery ber-JOIN karena itu memang harus dihitung per-baris item.
-    // Transaksi VOIDED dikeluarkan dari semua perhitungan (dianggap tidak pernah terjadi); untuk
-    // transaksi yang diretur sebagian, returnedAmount dikurangkan dari totalRevenue.
+    /**
+     * Ringkasan penjualan satu rentang tanggal. TIGA perbaikan akuntansi dari versi sebelumnya:
+     *
+     * 1. `totalRevenue` sekarang OMZET BERSIH TANPA PPN. PPN adalah uang titipan negara, bukan
+     *    pendapatan toko — memasukkannya membuat omzet tampak lebih besar 11% dari kenyataan.
+     *    Porsi yang sudah diretur dikurangkan secara proporsional (returnedAmount adalah nominal
+     *    kotor termasuk PPN, jadi dipotong sebagai rasio terhadap total, bukan dikurangkan mentah).
+     * 2. `totalGrossProfit` memakai `ti.purchasePriceSnapshot` (harga beli yang DIBEKUKAN saat
+     *    transaksi, v16) — bukan lagi JOIN hidup ke `products.purchasePrice` yang membuat laba
+     *    periode lampau ikut berubah setiap Admin memperbarui harga beli.
+     * 3. `totalGrossProfit` sekarang JUGA dikurangi potongan promo per-baris (`ti.promoDiscount`)
+     *    dan SELURUH diskon tingkat transaksi (`t.discountAmount` = diskon manual transaksi +
+     *    penukaran poin loyalitas + promo minimal belanja). Sebelumnya ketiganya tidak pernah
+     *    dikurangkan sama sekali, sehingga Laba Bersih di Laporan SELALU lebih optimis dari
+     *    kenyataan — persis jenis kesalahan yang paling sulit disadari pemilik toko.
+     *
+     * Transaksi VOIDED dikeluarkan dari semua perhitungan (dianggap tidak pernah terjadi).
+     */
     @Query(
         """
         SELECT
-            (SELECT COALESCE(SUM(total - returnedAmount), 0) FROM transactions
+            (SELECT COALESCE(SUM(
+                CASE WHEN total > 0
+                     THEN (total - taxAmount) * (1.0 - (returnedAmount / total))
+                     ELSE 0.0 END), 0)
+                FROM transactions
                 WHERE createdAt BETWEEN :start AND :end AND status != 'VOIDED') AS totalRevenue,
             (SELECT COUNT(*) FROM transactions
                 WHERE createdAt BETWEEN :start AND :end AND status != 'VOIDED') AS totalTransactions,
-            (SELECT COALESCE(SUM((ti.priceSnapshot - p.purchasePrice) * ti.quantity - ti.itemDiscount), 0)
+            (SELECT COALESCE(SUM(
+                    (ti.priceSnapshot - ti.purchasePriceSnapshot) * ti.quantity
+                    - ti.itemDiscount - ti.promoDiscount), 0)
                 FROM transaction_items ti
                 JOIN transactions t ON t.id = ti.transactionId
-                JOIN products p ON p.id = ti.productId
-                WHERE t.createdAt BETWEEN :start AND :end AND t.status != 'VOIDED') AS totalGrossProfit
+                WHERE t.createdAt BETWEEN :start AND :end AND t.status != 'VOIDED')
+            - (SELECT COALESCE(SUM(discountAmount), 0) FROM transactions
+                WHERE createdAt BETWEEN :start AND :end AND status != 'VOIDED') AS totalGrossProfit
         """
     )
     suspend fun getSalesSummary(start: Long, end: Long): DailySalesSummary
@@ -150,13 +226,12 @@ interface TransactionDao {
     @Query(
         """
         SELECT COALESCE(SUM(
-            (ti.priceSnapshot - p.purchasePrice) * tri.quantityReturned
-            - (ti.itemDiscount * tri.quantityReturned * 1.0 / ti.quantity)
+            (ti.priceSnapshot - ti.purchasePriceSnapshot) * tri.quantityReturned
+            - ((ti.itemDiscount + ti.promoDiscount) * tri.quantityReturned * 1.0 / ti.quantity)
         ), 0)
         FROM transaction_return_items tri
         JOIN transaction_items ti ON ti.id = tri.transactionItemId
         JOIN transactions t ON t.id = ti.transactionId
-        JOIN products p ON p.id = ti.productId
         WHERE t.createdAt BETWEEN :start AND :end
         """
     )
@@ -208,7 +283,7 @@ interface TransactionDao {
             SUM(ti.quantity) as totalQty,
             SUM(ti.lineTotalHelper) as totalRevenue
         FROM (
-            SELECT *, (priceSnapshot * quantity - itemDiscount) as lineTotalHelper FROM transaction_items
+            SELECT *, (priceSnapshot * quantity - itemDiscount - promoDiscount) as lineTotalHelper FROM transaction_items
         ) ti
         JOIN transactions t ON t.id = ti.transactionId
         WHERE t.createdAt BETWEEN :start AND :end AND t.status != 'VOIDED'

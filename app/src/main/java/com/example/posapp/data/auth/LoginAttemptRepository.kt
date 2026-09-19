@@ -56,6 +56,14 @@ class LoginAttemptRepository @Inject constructor(
         // ke 0 kalau device di-reboot (restart device jauh lebih tidak praktis sebagai cara
         // membypass lockout berulang kali dibanding sekadar mengubah jam).
         private val KEY_LOCKED_UNTIL_ELAPSED = longPreferencesKey("locked_until_elapsed_realtime")
+
+        // TEMUAN LANJUTAN (audit v16): elapsedRealtime SAJA masih bisa dilewati dengan
+        // ME-REBOOT HP — jam sejak boot kembali ke 0, jadi deadline lama otomatis dianggap
+        // sudah lewat. Sekarang deadline disimpan GANDA: satu berbasis elapsedRealtime (tahan
+        // terhadap pengubahan jam sistem) dan satu berbasis wall-clock (tahan terhadap reboot).
+        // Lockout dianggap masih berjalan selama SALAH SATU dari keduanya belum lewat, jadi
+        // penyerang harus mengalahkan kedua sumber waktu sekaligus, bukan salah satunya.
+        private val KEY_LOCKED_UNTIL_WALL = longPreferencesKey("locked_until_wall_clock")
     }
 
     data class LockState(val remainingSeconds: Long)
@@ -63,8 +71,13 @@ class LoginAttemptRepository @Inject constructor(
     /** null kalau sedang TIDAK dalam masa lockout (boleh mencoba PIN lagi sekarang). */
     suspend fun currentLockState(): LockState? {
         val prefs = context.loginAttemptDataStore.data.first()
-        val lockedUntil = prefs[KEY_LOCKED_UNTIL_ELAPSED] ?: 0L
-        val remainingMillis = lockedUntil - SystemClock.elapsedRealtime()
+        val remainingElapsed = (prefs[KEY_LOCKED_UNTIL_ELAPSED] ?: 0L) - SystemClock.elapsedRealtime()
+        val remainingWall = (prefs[KEY_LOCKED_UNTIL_WALL] ?: 0L) - System.currentTimeMillis()
+        // Ambil yang PALING LAMA di antara kedua sumber waktu: memundurkan jam sistem tidak
+        // menolong (elapsedRealtime tidak terpengaruh), me-reboot HP juga tidak (wall-clock
+        // tersimpan tetap di masa depan). Batas atas MAX_LOCKOUT_MILLIS mencegah nilai wall-clock
+        // yang aneh (mis. pengguna memundurkan jam bertahun-tahun) mengunci device selamanya.
+        val remainingMillis = maxOf(remainingElapsed, remainingWall).coerceAtMost(MAX_LOCKOUT_MILLIS)
         if (remainingMillis <= 0) return null
         return LockState(remainingSeconds = (remainingMillis + 999) / 1000)
     }
@@ -80,8 +93,8 @@ class LoginAttemptRepository @Inject constructor(
             if (attempts > MAX_FREE_ATTEMPTS) {
                 val doublings = (attempts - MAX_FREE_ATTEMPTS - 1).coerceIn(0, 10)
                 val lockoutMillis = (BASE_LOCKOUT_MILLIS shl doublings).coerceAtMost(MAX_LOCKOUT_MILLIS)
-                val lockedUntil = SystemClock.elapsedRealtime() + lockoutMillis
-                prefs[KEY_LOCKED_UNTIL_ELAPSED] = lockedUntil
+                prefs[KEY_LOCKED_UNTIL_ELAPSED] = SystemClock.elapsedRealtime() + lockoutMillis
+                prefs[KEY_LOCKED_UNTIL_WALL] = System.currentTimeMillis() + lockoutMillis
                 result = LockState(remainingSeconds = (lockoutMillis + 999) / 1000)
             }
         }
@@ -94,6 +107,7 @@ class LoginAttemptRepository @Inject constructor(
         context.loginAttemptDataStore.edit { prefs ->
             prefs[KEY_FAILED_ATTEMPTS] = 0
             prefs.remove(KEY_LOCKED_UNTIL_ELAPSED)
+            prefs.remove(KEY_LOCKED_UNTIL_WALL)
         }
     }
 }

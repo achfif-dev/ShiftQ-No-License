@@ -36,6 +36,10 @@ class BackupRepository @Inject constructor(
     private val appDatabase: AppDatabase
 ) {
     private val dbFile: File get() = context.getDatabasePath(AppDatabase.DATABASE_NAME)
+
+    /** Versi skema Room yang dikenal build ini — WAJIB dinaikkan bersamaan dengan
+     * `@Database(version = ...)` di AppDatabase, lihat pengecekan di [restore]. */
+    private val CURRENT_SCHEMA_VERSION = AppDatabase.SCHEMA_VERSION
     private val backupDir: File get() = File(context.getExternalFilesDir(null), "backups").apply { mkdirs() }
 
     /** @param password Wajib diisi (min 6 karakter) — dipakai untuk mengenkripsi hasil backup.
@@ -61,9 +65,26 @@ class BackupRepository @Inject constructor(
      * @param password Wajib cocok kalau [sourceFile] berformat `.posbak` terenkripsi (dicek lewat
      * isi file, bukan ekstensi nama file — lihat [BackupCrypto.hasMagic]). Diabaikan untuk file
      * backup lama format mentah (dari versi app sebelum fitur enkripsi ini ada).
+     *
+     * PERBAIKAN (audit — restore bisa menghancurkan data tanpa jalan pulang): versi sebelumnya
+     * langsung `copyTo(dbFile, overwrite = true)` tanpa pengaman apa pun. Tiga hal yang bisa
+     * membuat seluruh data toko hilang permanen, semuanya sekarang ditutup:
+     *
+     * 1. TIDAK ADA salinan pengaman. Kalau apa pun gagal di tengah penimpaan, database asli
+     *    sudah telanjur rusak dan tidak ada jalan kembali. Sekarang DB lama disalin dulu ke
+     *    `pos_database.prerestore` dan dikembalikan otomatis kalau langkah mana pun gagal.
+     * 2. TIDAK ADA verifikasi hasil dekripsi. File hasil dekripsi tidak pernah dicek benar-benar
+     *    database SQLite atau bukan. Sekarang header 16-byte SQLite ("SQLite format 3\u0000")
+     *    diperiksa sebelum file itu dipercaya.
+     * 3. TIDAK ADA pengecekan versi skema. Me-restore backup yang dibuat APK lebih BARU ke APK
+     *    lama akan kena `fallbackToDestructiveMigrationOnDowngrade` dan MENGHAPUS SEMUANYA saat
+     *    app dibuka lagi. Sekarang `PRAGMA user_version` file backup dibaca dulu dan restore
+     *    DITOLAK kalau versinya lebih tinggi dari skema yang dikenal app ini, dengan pesan yang
+     *    memberi tahu pengguna untuk memperbarui aplikasi lebih dulu.
      */
     fun restore(sourceFile: File, password: String): BackupResult {
         var tempDecrypted: File? = null
+        var safetyCopy: File? = null
         return try {
             if (!sourceFile.exists()) return BackupResult.Error("File backup tidak ditemukan")
 
@@ -73,6 +94,7 @@ class BackupRepository @Inject constructor(
                 try {
                     BackupCrypto.decrypt(source = sourceFile, destination = temp, password = password)
                 } catch (e: BackupCrypto.WrongPasswordException) {
+                    temp.delete()
                     return BackupResult.Error("Password salah atau file backup rusak")
                 }
                 tempDecrypted = temp
@@ -81,19 +103,79 @@ class BackupRepository @Inject constructor(
                 sourceFile
             }
 
+            if (!isSqliteFile(restoreSource)) {
+                return BackupResult.Error(
+                    "File ini bukan database yang valid (mungkin password salah atau file rusak). " +
+                        "Data lama TIDAK diubah."
+                )
+            }
+
+            val backupSchemaVersion = readSchemaVersion(restoreSource)
+            if (backupSchemaVersion != null && backupSchemaVersion > CURRENT_SCHEMA_VERSION) {
+                return BackupResult.Error(
+                    "Backup ini dibuat oleh versi aplikasi yang lebih baru (skema v$backupSchemaVersion, " +
+                        "aplikasi ini v$CURRENT_SCHEMA_VERSION). Perbarui aplikasi dulu, baru restore. " +
+                        "Data lama TIDAK diubah."
+                )
+            }
+
             appDatabase.close()
+
+            // Salinan pengaman SEBELUM apa pun ditimpa — satu-satunya jalan pulang kalau
+            // penyalinan di bawah gagal di tengah jalan (storage penuh, proses dimatikan, dll).
+            if (dbFile.exists()) {
+                val copy = File(dbFile.path + ".prerestore")
+                dbFile.copyTo(copy, overwrite = true)
+                safetyCopy = copy
+            }
 
             // Hapus file -wal dan -shm lama agar tidak konflik dengan database hasil restore.
             File(dbFile.path + "-wal").delete()
             File(dbFile.path + "-shm").delete()
 
-            restoreSource.copyTo(dbFile, overwrite = true)
+            try {
+                restoreSource.copyTo(dbFile, overwrite = true)
+            } catch (e: Exception) {
+                safetyCopy?.let { runCatching { it.copyTo(dbFile, overwrite = true) } }
+                return BackupResult.Error(
+                    "Restore gagal di tengah proses, database lama sudah dikembalikan: ${e.message ?: "-"}"
+                )
+            }
+
+            // Sukses: salinan pengaman disimpan (tidak dihapus) sampai restore berikutnya, supaya
+            // pemilik toko masih punya jalan pulang kalau ternyata salah pilih file backup.
             BackupResult.Success(dbFile)
         } catch (e: Exception) {
+            safetyCopy?.let { runCatching { it.copyTo(dbFile, overwrite = true) } }
             BackupResult.Error(e.message ?: "Gagal melakukan restore. Pastikan file backup & password valid.")
         } finally {
             tempDecrypted?.delete()
         }
+    }
+
+    /** Header wajib setiap file SQLite 3: "SQLite format 3" + byte 0. */
+    private fun isSqliteFile(file: File): Boolean = try {
+        java.io.RandomAccessFile(file, "r").use { raf ->
+            val header = ByteArray(16)
+            raf.readFully(header)
+            String(header, Charsets.US_ASCII) == "SQLite format 3\u0000"
+        }
+    } catch (e: Exception) {
+        false
+    }
+
+    /** `PRAGMA user_version` disimpan SQLite sebagai big-endian 4 byte di offset 60 — dibaca
+     * langsung dari file supaya tidak perlu membuka database yang belum tentu bisa dibuka. */
+    private fun readSchemaVersion(file: File): Int? = try {
+        java.io.RandomAccessFile(file, "r").use { raf ->
+            raf.seek(60)
+            val b = ByteArray(4)
+            raf.readFully(b)
+            ((b[0].toInt() and 0xFF) shl 24) or ((b[1].toInt() and 0xFF) shl 16) or
+                ((b[2].toInt() and 0xFF) shl 8) or (b[3].toInt() and 0xFF)
+        }
+    } catch (e: Exception) {
+        null
     }
 
     /** Dipakai UI untuk memutuskan apakah perlu menampilkan kolom password saat me-restore

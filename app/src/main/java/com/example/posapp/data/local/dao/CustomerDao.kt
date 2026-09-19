@@ -106,6 +106,12 @@ interface CustomerDao {
     @Update
     suspend fun update(customer: CustomerEntity)
 
+    /** v16: total pelunasan piutang yang diterima TUNAI selama satu shift — ditambahkan ke
+     * "kas seharusnya" saat tutup shift. Pelunasan non-tunai (transfer/QRIS) sengaja tidak
+     * dihitung karena uangnya tidak pernah masuk laci. */
+    @Query("SELECT COALESCE(SUM(amount), 0) FROM debt_payments WHERE shiftId = :shiftId AND isCash = 1")
+    suspend fun getCashDebtPaymentTotalForShift(shiftId: Long): Double
+
     @Query("SELECT * FROM debt_payments WHERE customerId = :customerId ORDER BY createdAt DESC")
     fun observePayments(customerId: Long): Flow<List<DebtPaymentEntity>>
 

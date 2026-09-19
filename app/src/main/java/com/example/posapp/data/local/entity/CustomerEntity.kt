@@ -45,5 +45,12 @@ data class DebtPaymentEntity(
     val customerId: Long,
     val amount: Double,
     val note: String? = null,
+    /** v16: true = uang pelunasan diterima TUNAI dan masuk ke laci kasir, jadi harus menambah
+     * "kas seharusnya" saat tutup shift. false = transfer/QRIS, tidak menyentuh laci.
+     * Sebelumnya pelunasan piutang tidak pernah ikut dihitung di rekonsiliasi shift sama sekali,
+     * sehingga kas fisik selalu tampak BERLEBIH sebesar pelunasan tunai yang diterima hari itu. */
+    val isCash: Boolean = true,
+    /** v16: shift yang aktif saat pelunasan dicatat (null = tidak ada shift terbuka / baris lama). */
+    val shiftId: Long? = null,
     val createdAt: Long = System.currentTimeMillis()
 )
