@@ -38,6 +38,15 @@ class MigrationTest {
         FrameworkSQLiteOpenHelperFactory()
     )
 
+    /**
+     * CATATAN PENTING: ini bukan sekadar "migrasi tidak melempar exception" — `runMigrationsAndValidate`
+     * dengan `validateDroppedTables = true` memanggil PERSIS logika `RoomOpenHelper.validateMigration`
+     * yang sama dengan yang dipanggil di runtime perangkat asli saat app dibuka setelah update.
+     * Kegagalan nyata pernah terjadi di sini: literal `DEFAULT NULL` pada `ALTER TABLE ADD COLUMN`
+     * membuat SQLite menyimpan default sebagai teks "NULL", sementara skema hasil entity Kotlin
+     * (tanpa @ColumnInfo(defaultValue=...)) mengharapkan tidak ada default sama sekali — mismatch
+     * yang HANYA ketahuan lewat test path ini, bukan lewat compile atau unit test JVM biasa.
+     */
     @Test
     fun migrate15To16_menjaga_data_lama_dan_mengisi_snapshot_harga_beli() {
         helper.createDatabase(TEST_DB, 15).apply {
