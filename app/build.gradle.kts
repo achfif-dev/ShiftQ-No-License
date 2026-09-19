@@ -55,8 +55,8 @@ android {
         // sejak 1.1.0: Promo Otomatis, Tahan Transaksi, Reminder Piutang, Cetak Label, Rekonsiliasi
         // Kas, keamanan cross-tenant Cloud Sync, dll) -- versionCode WAJIB naik dari build
         // sebelumnya yang pernah diinstal (Play Store menolak versionCode yang sama/lebih kecil).
-        versionCode = 4
-        versionName = "2.0.1"
+        versionCode = 5
+        versionName = "2.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
@@ -235,6 +235,10 @@ dependencies {
     // Cloud Functions callable — dipakai TenantAuthProvider (mintSyncToken), PaymentGatewayRepository
     // (Fase 5-6) untuk memanggil backend tanpa menanam kredensial/rahasia apa pun di dalam APK.
     implementation("com.google.firebase:firebase-functions-ktx")
+    // v16 (audit): App Check — memastikan hanya build resmi aplikasi ini yang bisa memanggil
+    // Cloud Functions & Firestore. Tanpa ini, siapa pun yang mengekstrak google-services.json
+    // dari APK bisa memanggil semua callable function langsung dari skrip.
+    implementation("com.google.firebase:firebase-appcheck-playintegrity")
 
     // WorkManager + Hilt — penjadwalan tugas latar belakang oportunistik (hanya jalan saat ada
     // internet, lihat Constraints.NETWORK_TYPE_CONNECTED): sinkronisasi katalog produk/stok
@@ -246,6 +250,11 @@ dependencies {
     // Testing
     testImplementation("junit:junit:4.13.2") // termasuk org.junit.rules.TemporaryFolder dipakai BackupCryptoTest
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    // v16 (audit): MigrationTestHelper — menguji migrasi Room terhadap snapshot skema SUNGGUHAN
+    // di app/schemas (sudah lama di-commit & androidTest assets sudah diarahkan ke sana, tapi
+    // testnya tidak pernah ada). CATATAN: CI saat ini hanya menjalankan testDebugUnitTest (JVM),
+    // jadi test ini BELUM ikut jalan otomatis — perlu step connectedAndroidTest di workflow.
+    androidTestImplementation("androidx.room:room-testing:2.8.4")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
     androidTestImplementation(platform("androidx.compose:compose-bom:2026.06.00"))
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
