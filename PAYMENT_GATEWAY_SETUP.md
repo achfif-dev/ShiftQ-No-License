@@ -61,3 +61,27 @@ Midtrans selesai diverifikasi Midtrans (biasanya perlu upload dokumen usaha).
 
 Tidak masalah — cukup jangan isi Pengaturan > Payment Gateway. Aplikasi tetap berjalan normal
 dengan QRIS statis manual seperti biasa.
+
+
+## Tambahan v16 (hasil audit)
+
+### Aktifkan TTL Firestore untuk `payment_status`
+Dokumen status pembayaran sebelumnya tidak pernah dihapus, jadi biayanya naik terus untuk data
+yang tidak berguna lagi setelah beberapa menit. Sejak v16 setiap dokumen membawa field
+`expireAt` (7 hari, cukup untuk penelusuran sengketa pembayaran).
+
+Firebase Console > **Firestore Database** > tab **TTL** > *Create policy*:
+koleksi `payment_status`, field timestamp `expireAt`.
+
+### Pindah device tanpa menghubungi developer
+Kredensial Midtrans terikat ke `ownerUid` device yang pertama kali menyimpannya. Kalau data
+aplikasi dihapus / HP diganti, uid anonim lama hilang dan ikatan itu tidak akan cocok lagi.
+
+Sejak v16 tidak perlu lagi menghubungi developer: cukup buka Pengaturan > Payment Gateway di
+device baru dan masukkan ulang **Server Key Midtrans yang sama persis**. Server memakai Server
+Key itu sendiri sebagai bukti kepemilikan (hanya ada di dashboard Midtrans milik toko tersebut)
+lalu memindahkan ikatannya ke device baru.
+
+### App Check
+`createQrisCharge` dan `saveGatewayCredentials` sekarang mewajibkan App Check. Ikuti langkah di
+FIREBASE_SETUP.md bagian **4b** SEBELUM men-deploy functions.

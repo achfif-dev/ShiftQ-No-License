@@ -69,6 +69,31 @@ Di Firebase Console, proyek yang tadi dibuat:
    Semua Cabang sendiri memakai custom token — lihat langkah 5 — BUKAN anonim, tapi provider
    Anonymous tetap harus aktif untuk fitur Payment Gateway.)
 
+## 4b. Aktifkan App Check — WAJIB, DAN HARUS SEBELUM DEPLOY FUNCTIONS
+
+Sejak v16, semua Cloud Function callable (`mintSyncToken`, `saveGatewayCredentials`,
+`createQrisCharge`, `attachInvoiceToOrder`) dideploy dengan `enforceAppCheck: true`. Tanpa App
+Check, siapa pun yang mengekstrak `google-services.json` dari APK bisa memanggil fungsi-fungsi
+itu langsung dari skrip.
+
+**Urutannya tidak boleh dibalik.** Kalau functions dideploy sebelum App Check terdaftar, seluruh
+fitur Cloud Sync, Cek Stok Semua Cabang, dan QRIS Otomatis akan DITOLAK server di semua device
+sampai pendaftaran selesai. Fitur POS inti (kasir, stok, laporan, cetak struk) tetap jalan
+normal karena semuanya offline.
+
+1. Firebase Console > **App Check** > tab **Apps** > pilih aplikasi Android ini.
+2. Pilih provider **Play Integrity**, lalu daftarkan.
+3. Masih di App Check, tab **APIs**: biarkan **Cloud Functions** dalam mode *Unenforced* dulu,
+   pantau tab Metrics beberapa jam sampai terlihat permintaan yang "Verified" masuk dari device
+   nyata. Baru setelah itu ubah ke *Enforced*.
+4. Untuk uji coba dengan build debug: token debug muncul di Logcat saat app pertama dibuka —
+   daftarkan manual di App Check > Apps > menu titik tiga > **Manage debug tokens**.
+
+Kalau device lama pernah sinkron sebelum v16, permintaan pertamanya akan mendaftarkan ulang
+identitas device secara otomatis (tidak ada yang perlu dilakukan pemilik toko). Kalau muncul
+pesan *"device sudah terdaftar di instalasi lain"* — itu terjadi kalau data aplikasi pernah
+dihapus — gunakan tombol **Buat Ulang ID Cabang** di Pengaturan > Sinkronisasi Cloud.
+
 ## 5. Deploy Cloud Functions & Firestore Rules lewat GitHub Actions
 
 Rules TIDAK ditempel manual lewat Firebase Console — sekarang jadi satu paket dengan

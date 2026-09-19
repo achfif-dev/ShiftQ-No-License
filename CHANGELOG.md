@@ -4,6 +4,85 @@ Semua perubahan penting pada proyek ini dicatat di file ini.
 Format mengikuti [Keep a Changelog](https://keepachangelog.com/), versioning mengikuti [Semantic Versioning](https://semver.org/).
 
 ## [Unrilis]
+### Keamanan & Akuntansi (audit lapisan uang, v16 — DB 15 -> 16)
+> **URUTAN DEPLOY WAJIB DIBACA.** Cloud Functions di rilis ini memakai `enforceAppCheck: true`.
+> Daftarkan aplikasi di **Firebase Console > App Check (provider Play Integrity) LEBIH DULU**,
+> baru `firebase deploy --only functions`. Urutan terbalik akan menolak seluruh permintaan
+> Cloud Sync & QRIS Otomatis dari semua device sampai pendaftaran selesai. Aktifkan juga TTL
+> Firestore untuk koleksi `payment_status` pada field `expireAt`.
+
+#### Kritis
+- **Potongan promo per-baris tidak pernah tersimpan.** `CheckoutUseCase` hanya menulis
+  `line.discount`; `line.promoDiscount` dari `PromoEngine` hilang total. Akibatnya Σ(nilai item)
+  ≠ `transactions.total`, laba kotor kelebihan hitung sebesar nilai promo, struk cetak-ulang
+  salah nominal, dan retur bisa me-refund lebih besar dari yang dibayar pelanggan. Ditambahkan
+  kolom `transaction_items.promoDiscount` (kolom sendiri, bukan digabung ke `itemDiscount`,
+  supaya laporan tetap bisa memisahkan diskon kasir dari promo otomatis). Pemetaan keranjang ->
+  item dipisah jadi fungsi murni `CheckoutUseCase.buildTransactionItems` + test regresi.
+- **Laba kotor memakai harga beli HIDUP, bukan snapshot.** `getSalesSummary` JOIN ke
+  `products.purchasePrice`, sehingga memperbarui harga beli hari ini diam-diam mengubah laba
+  bulan-bulan lalu. Ditambahkan `transaction_items.purchasePriceSnapshot` (dibekukan saat
+  checkout; baris lama di-backfill dari harga beli saat migrasi berjalan).
+- **Laba kotor mengabaikan seluruh diskon tingkat transaksi.** `discountAmount` (diskon manual
+  transaksi + penukaran poin loyalitas + promo min-belanja) tidak pernah dikurangkan, jadi Laba
+  Bersih SELALU lebih optimis dari kenyataan. Sekarang dikurangkan. `totalRevenue` juga berubah
+  jadi **omzet tanpa PPN** (PPN adalah uang titipan negara, bukan pendapatan toko), dengan porsi
+  retur dipotong proporsional.
+- **`mintSyncToken` bisa dipakai memalsukan identitas cabang lain.** uid dibentuk langsung dari
+  `deviceId` kiriman client, tanpa auth & tanpa App Check — sementara `deviceId` = `outletId`
+  yang bisa dibaca anggota grup mana pun lewat `outlet_catalog`. Sekarang: `enforceAppCheck`,
+  plus `deviceId` didaftarkan sekali dengan rahasia acak buatan SERVER yang wajib dibuktikan di
+  permintaan berikutnya, dan `deviceId` tidak boleh berpindah grup. Device lama (belum punya
+  dokumen `sync_devices`) mendaftar mulus tanpa terkunci. Disediakan tombol **Buat Ulang ID
+  Cabang** di Pengaturan > Sinkronisasi Cloud sebagai pemulihan mandiri.
+- **Restore backup bisa menghancurkan data tanpa jalan pulang.** `restore()` langsung menimpa
+  file DB tanpa salinan pengaman, tanpa verifikasi hasil dekripsi, dan tanpa cek versi skema
+  (restore backup dari APK lebih baru = `fallbackToDestructiveMigrationOnDowngrade` menghapus
+  semuanya). Ditambah: salinan `.prerestore` + rollback otomatis, verifikasi header SQLite, dan
+  penolakan `user_version` yang lebih tinggi dari skema build ini. `BackupCrypto.decrypt`
+  dipindah dari `CipherInputStream` ke `cipher.doFinal()` eksplisit — pada GCM, CipherInputStream
+  bisa MEMOTONG stream tanpa exception di sebagian runtime Android (unit test di JVM tetap
+  lolos), yang berarti password salah menimpa database asli dengan sampah. `read()` diganti
+  `readFully()` untuk salt/IV/magic.
+
+#### Tinggi
+- **Void setelah retur sebagian = stok dobel.** `voidTransaction` mengembalikan stok seluruh
+  item termasuk yang sudah masuk rak lagi lewat `processReturn(restocked = true)`. Sekarang qty
+  yang sudah direstock dikurangi dulu.
+- **`refundAmount` tidak divalidasi.** Nominal apa pun diterima; hanya qty yang dicek. Sekarang
+  ditolak kalau negatif atau melebihi sisa yang belum diretur (toleransi Rp1 untuk pembulatan).
+- **Rekonsiliasi shift bocor di tiga tempat.** Ditambahkan `shiftId` EKSPLISIT di `transactions`,
+  `transaction_returns`, dan `debt_payments` (menggantikan penyimpulan dari rentang waktu):
+  refund tunai kini DIKURANGKAN dari kas seharusnya, pelunasan piutang tunai DITAMBAHKAN
+  (dengan pilihan tunai/non-tunai di dialog Catat Pelunasan), dan transaksi yang terjadi tanpa
+  shift terbuka ditampilkan sebagai PERINGATAN di layar tutup shift — bukan diseret paksa ke
+  shift orang lain.
+- **Kembalian tunai bisa keluar dari pembayaran non-tunai.** Nominal BON/QRIS/Debit bebas
+  diketik dan kelebihannya muncul sebagai "Kembalian" — kasir bisa input Bon Rp200rb untuk
+  belanja Rp150rb lalu memberi Rp50rb tunai riil. Metode non-tunai kini di-clamp ke sisa tagihan.
+- **Toko bisa terkunci dari kredensial Midtrans-nya sendiri** (uid anonim hilang saat clear
+  data/reinstall, pesan errornya sendiri berbunyi "hubungi developer"). Ditambahkan jalur rebind
+  mandiri: memasukkan ulang Server Key Midtrans yang sama persis memindahkan ikatan ke device
+  baru (dibandingkan dengan `timingSafeEqual`).
+- **`orderId` QRIS Otomatis tidak terhubung ke invoice.** Ditambahkan callable
+  `attachInvoiceToOrder` yang dipanggil setelah checkout berhasil (fail-soft). Dokumen
+  `payment_status` kini punya `expireAt` untuk TTL 7 hari — sebelumnya tidak pernah dihapus.
+
+#### Sedang
+- Rute `stock` digerbang `Permission.canAccessStock` (ADMIN & MANAGER). Angka bisnis di Laporan
+  (omzet, laba kotor, tren harian, produk terlaris) digerbang `canViewSalesAnalytics` **di
+  ViewModel** — tidak dimuat sama sekali untuk Kasir. Rute `reports` SENGAJA tidak digerbang
+  penuh: Riwayat Penjualan di layar itu adalah tempat Kasir memproses retur.
+- Lockout PIN kini menyimpan deadline GANDA (elapsedRealtime + wall-clock). Sebelumnya hanya
+  `elapsedRealtime`, yang bisa dilewati instan dengan me-reboot HP.
+- App Check (Play Integrity) dipasang di seluruh jalur Firebase.
+- Test baru: `PromoEngineTest` (8 kasus), `CheckoutItemMappingTest` (4 kasus, regresi promo
+  hilang & snapshot harga beli), `MigrationTest` 15->16 (androidTest — **belum ikut CI**, perlu
+  step `connectedDebugAndroidTest` di workflow).
+- Perbaikan staleness `observeOverdueDebtors`: `now` dulu dibekukan sekali saat Flow dibuat,
+  jadi piutang yang baru lewat tenggat tidak pernah muncul selama layar tetap terbuka.
+
+## [Rilis sebelumnya — belum ditandai versi]
 ### Keamanan (audit ulang, 2026-09-14)
 - **Batas diskon manual Kasir + audit log**: sebelumnya diskon manual per-item/per-transaksi
   bisa diberikan Kasir biasa TANPA batas (sampai 100%, membuat barang "gratis" secara sah di

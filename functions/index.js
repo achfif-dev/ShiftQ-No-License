@@ -57,17 +57,94 @@ const REGION = "asia-southeast2";
  * sengaja dipakai di FirebaseApp KEDUA (terpisah dari sesi anonim default
  * PaymentGatewayRepository).
  */
-exports.mintSyncToken = onCall({ region: REGION }, async (request) => {
-  const { groupCode, deviceId } = request.data || {};
+exports.mintSyncToken = onCall({ region: REGION, enforceAppCheck: true }, async (request) => {
+  const { groupCode, deviceId, deviceSecret } = request.data || {};
   if (!groupCode || !deviceId) {
     throw new HttpsError("invalid-argument", "groupCode dan deviceId wajib diisi.");
   }
+  if (typeof deviceId !== "string" || deviceId.length < 8 || deviceId.length > 128) {
+    throw new HttpsError("invalid-argument", "deviceId tidak valid.");
+  }
 
-  const customerGroupId = crypto.createHash("sha256").update(groupCode).digest("hex");
+  const customerGroupId = sha256Hex(groupCode);
+
+  // TEMUAN KEAMANAN (audit) — PEMALSUAN IDENTITAS CABANG LAIN:
+  // Versi sebelumnya membentuk uid LANGSUNG dari deviceId yang dikirim client
+  // (`sync_<deviceId>`), tanpa request.auth dan tanpa App Check. Sementara deviceId itu sendiri
+  // = outletId = doc ID di outlet_catalog, yang BISA DIBACA setiap anggota grup. Jadi siapa pun
+  // yang tahu kode grup (atau satu cabang nakal di dalam grup) bisa meminta token dengan uid
+  // cabang lain, lalu menimpa katalog/stok/omzet cabang tersebut — `ownerUid` yang dipakai
+  // firestore.rules praktis kehilangan makna.
+  //
+  // Dua lapis perbaikan:
+  // 1. `enforceAppCheck: true` — hanya build resmi aplikasi ini yang boleh memanggil fungsi ini,
+  //    bukan siapa pun yang mengekstrak google-services.json dari APK lalu memanggil langsung.
+  //    WAJIB: daftarkan App Check (Play Integrity) di Firebase Console sebelum deploy ini,
+  //    kalau tidak SEMUA client akan ditolak. Lihat FIREBASE_SETUP.md.
+  // 2. deviceId sekarang DIDAFTARKAN sekali: pada permintaan PERTAMA, SERVER yang membuat
+  //    rahasia acak 32 byte dan menyimpan hash-nya; permintaan berikutnya untuk deviceId yang
+  //    sama WAJIB membuktikan rahasia itu. Client tidak lagi bebas menentukan identitas —
+  //    deviceId yang bocor tanpa rahasianya tidak bisa dipakai apa-apa.
+  const ref = db.collection("sync_devices").doc(deviceId);
+  const snap = await ref.get();
+
+  let effectiveSecret;
+  if (!snap.exists) {
+    effectiveSecret = crypto.randomBytes(32).toString("hex");
+    try {
+      // create() (bukan set()) supaya dua pendaftaran bersamaan untuk deviceId yang sama tidak
+      // saling menimpa — yang kalah masuk ke cabang "sudah terdaftar" di bawah.
+      await ref.create({
+        secretHash: sha256Hex(effectiveSecret),
+        customerGroupId,
+        createdAt: Date.now(),
+      });
+    } catch (e) {
+      throw new HttpsError("aborted", "Pendaftaran device bentrok, coba lagi.");
+    }
+  } else {
+    const data = snap.data();
+    // MIGRASI DEVICE LAMA (penting saat rilis perbaikan ini): dokumen sync_devices baru ada
+    // sejak v16. Device yang SUDAH pernah sinkron sebelum ini tidak memiliki dokumen sama
+    // sekali, jadi mereka masuk ke cabang "belum terdaftar" di atas dan mendaftar mulus.
+    // Yang di bawah ini menangani kasus dokumen ADA TAPI belum punya secretHash (mis. dibuat
+    // oleh versi transisi) — perlakukan sebagai pendaftaran pertama, jangan kunci pemiliknya
+    // sendiri di luar. Dokumen yang SUDAH punya secretHash tetap wajib membuktikan rahasianya.
+    if (!data.secretHash) {
+      effectiveSecret = crypto.randomBytes(32).toString("hex");
+      await ref.set(
+        { secretHash: sha256Hex(effectiveSecret), customerGroupId, createdAt: Date.now() },
+        { merge: true }
+      );
+      const uidMigrated = `sync_${deviceId}`;
+      const tokenMigrated = await admin.auth().createCustomToken(uidMigrated, { customerGroupId });
+      return { customToken: tokenMigrated, deviceSecret: effectiveSecret };
+    }
+    if (!deviceSecret || sha256Hex(String(deviceSecret)) !== data.secretHash) {
+      throw new HttpsError(
+        "permission-denied",
+        "Device ini sudah terdaftar di instalasi lain. Kalau ini device Anda sendiri dan data " +
+          "aplikasi pernah dihapus, buat ulang ID cabang dari Pengaturan > Sinkronisasi Cloud."
+      );
+    }
+    if (data.customerGroupId !== customerGroupId) {
+      // deviceId tidak boleh berpindah grup diam-diam: kalau bisa, satu device yang keluar dari
+      // grup A masih membawa uid yang sama ke grup B dan bisa menimpa dokumen lama grup A.
+      throw new HttpsError("permission-denied", "Device ini terdaftar di grup sinkronisasi lain.");
+    }
+    effectiveSecret = deviceSecret;
+  }
+
   const uid = `sync_${deviceId}`;
   const customToken = await admin.auth().createCustomToken(uid, { customerGroupId });
-  return { customToken };
+  // deviceSecret dikembalikan HANYA supaya client bisa menyimpannya setelah pendaftaran pertama;
+  // di panggilan berikutnya nilainya sama dengan yang sudah dipegang client.
+  return { customToken, deviceSecret: effectiveSecret };
 });
+
+function sha256Hex(value) {
+  return crypto.createHash("sha256").update(String(value)).digest("hex");
+}
 
 // ============================================================================================
 // PAYMENT GATEWAY (MIDTRANS) — kredensial MILIK TOKO SENDIRI, disimpan server-side saja.
@@ -88,7 +165,7 @@ exports.mintSyncToken = onCall({ region: REGION }, async (request) => {
  * Auth device itu — lihat PaymentGatewayRepository.kt yang sekarang wajib sign-in dulu sebelum
  * memanggil fungsi ini); percobaan berikutnya HANYA diterima kalau `request.auth.uid` sama
  * dengan `ownerUid` yang tersimpan. */
-exports.saveGatewayCredentials = onCall({ region: REGION }, async (request) => {
+exports.saveGatewayCredentials = onCall({ region: REGION, enforceAppCheck: true }, async (request) => {
   if (!request.auth) {
     throw new HttpsError("unauthenticated", "Sesi tidak valid, coba lagi setelah pastikan internet aktif.");
   }
@@ -98,11 +175,31 @@ exports.saveGatewayCredentials = onCall({ region: REGION }, async (request) => {
   const ref = db.collection("gateway_credentials").doc(outletId);
   const existing = await ref.get();
   if (existing.exists && existing.data().ownerUid && existing.data().ownerUid !== request.auth.uid) {
-    throw new HttpsError(
-      "permission-denied",
-      "outletId ini sudah terhubung ke device/akun lain. Kalau ini toko Anda sendiri dan " +
-        "berpindah device, hubungi developer untuk melepas ikatan lama."
-    );
+    // TEMUAN (audit) — TOKO TERKUNCI DARI KREDENSIALNYA SENDIRI: PaymentGatewayRepository
+    // sign-in ANONIM, dan uid anonim HILANG setiap kali data app dibersihkan / app dipasang
+    // ulang / HP diganti. Setelah itu ownerUid lama tidak akan pernah cocok lagi dan pesan
+    // errornya sendiri menyuruh "hubungi developer" — tiket dukungan yang pasti datang untuk
+    // produk yang dijual ke banyak toko.
+    //
+    // Jalur rebind mandiri: pemilik toko yang memang memegang Server Key Midtrans yang SAMA
+    // boleh mengambil alih ikatan outletId-nya sendiri. Pembuktian kepemilikan = Server Key,
+    // karena itulah rahasia yang hanya ada di dashboard Midtrans milik toko tersebut.
+    // Dibandingkan dengan timingSafeEqual supaya tidak bocor lewat perbedaan waktu respons.
+    const sameServerKey =
+      !clear &&
+      typeof serverKey === "string" &&
+      typeof existing.data().serverKey === "string" &&
+      serverKey.length === existing.data().serverKey.length &&
+      crypto.timingSafeEqual(Buffer.from(serverKey), Buffer.from(existing.data().serverKey));
+    if (!sameServerKey) {
+      throw new HttpsError(
+        "permission-denied",
+        "outletId ini sudah terhubung ke device/akun lain. Kalau ini toko Anda sendiri dan " +
+          "berpindah device, masukkan ulang Server Key Midtrans yang sama persis untuk " +
+          "memindahkan ikatannya ke device ini."
+      );
+    }
+    console.log(`saveGatewayCredentials: rebind outlet ${outletId} ke uid baru ${request.auth.uid}`);
   }
 
   if (clear) {
@@ -136,7 +233,7 @@ function midtransBaseUrl(isProduction) {
  * QRIS atas nama toko tersebut di dashboard Midtrans mereka (bukan mencuri uang langsung karena
  * tetap butuh orang yang benar-benar scan & bayar, tapi bisa dipakai untuk spam/mengacaukan
  * riwayat transaksi toko korban). */
-exports.createQrisCharge = onCall({ region: REGION }, async (request) => {
+exports.createQrisCharge = onCall({ region: REGION, enforceAppCheck: true }, async (request) => {
   if (!request.auth) {
     throw new HttpsError("unauthenticated", "Sesi tidak valid, coba lagi setelah pastikan internet aktif.");
   }
@@ -186,6 +283,12 @@ exports.createQrisCharge = onCall({ region: REGION }, async (request) => {
     status: "PENDING",
     createdAt: Date.now(),
     ownerUid: request.auth.uid,
+    // TEMUAN (audit): dokumen payment_status TIDAK PERNAH dihapus, jadi biaya penyimpanan
+    // Firestore naik terus selamanya untuk dokumen yang tidak berguna lagi setelah beberapa
+    // menit. `expireAt` di bawah dipakai Firestore TTL policy — AKTIFKAN sekali di Firebase
+    // Console (Firestore > TTL > koleksi `payment_status`, field `expireAt`), lihat
+    // PAYMENT_GATEWAY_SETUP.md. 7 hari, cukup lama untuk penelusuran sengketa pembayaran.
+    expireAt: admin.firestore.Timestamp.fromMillis(Date.now() + 7 * 24 * 60 * 60 * 1000),
   });
 
   return {
@@ -203,6 +306,34 @@ exports.createQrisCharge = onCall({ region: REGION }, async (request) => {
     // expiry below 15 minutes") -- jadi 15 menit default mereka justru pilihan paling aman.
     expiresAtMillis: Date.now() + 15 * 60 * 1000,
   };
+});
+
+/**
+ * TEMUAN (audit) — orderId QRIS Otomatis tidak terhubung ke invoice: orderId dibuat SEBELUM
+ * checkout selesai (`TEMP-<millis>-<rand>`), sementara nomor invoice final baru lahir setelahnya.
+ * Akibatnya merekonsiliasi dashboard Midtrans dengan Riwayat Penjualan harus dilakukan manual
+ * satu per satu berdasarkan jam & nominal. Fungsi ini dipanggil app SETELAH checkout berhasil
+ * untuk menempelkan nomor invoice final ke dokumen payment_status yang bersangkutan.
+ *
+ * Fail-soft di sisi client: kegagalan di sini tidak boleh membatalkan transaksi yang sudah
+ * tersimpan — paling buruk rekonsiliasinya kembali manual seperti sebelumnya.
+ */
+exports.attachInvoiceToOrder = onCall({ region: REGION, enforceAppCheck: true }, async (request) => {
+  if (!request.auth) {
+    throw new HttpsError("unauthenticated", "Sesi tidak valid.");
+  }
+  const { orderId, invoiceNumber } = request.data || {};
+  if (!orderId || !invoiceNumber) {
+    throw new HttpsError("invalid-argument", "orderId dan invoiceNumber wajib diisi.");
+  }
+  const ref = db.collection("payment_status").doc(orderId);
+  const snap = await ref.get();
+  if (!snap.exists) throw new HttpsError("not-found", "Order tidak ditemukan.");
+  if (snap.data().ownerUid !== request.auth.uid) {
+    throw new HttpsError("permission-denied", "Order ini bukan milik device ini.");
+  }
+  await ref.set({ invoiceNumber: String(invoiceNumber) }, { merge: true });
+  return { ok: true };
 });
 
 /**
