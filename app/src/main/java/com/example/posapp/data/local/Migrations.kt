@@ -274,6 +274,20 @@ val MIGRATION_14_15 = object : Migration(14, 15) {
  */
 val MIGRATION_15_16 = object : Migration(15, 16) {
     override fun migrate(db: SupportSQLiteDatabase) {
+        // PERBAIKAN (crash nyata di device — "Migration didn't properly handle"): menulis
+        // `DEFAULT NULL` secara eksplisit di ADD COLUMN membuat SQLite menyimpan literal teks
+        // "NULL" sebagai default kolom itu (terbukti dari log crash), sementara Room selalu
+        // mengharapkan kolom TANPA @ColumnInfo(defaultValue=...) tidak punya default sama
+        // sekali (sentinel "undefined"). Untuk kolom NULLABLE, SQLite tidak butuh klausa DEFAULT
+        // apa pun — nilainya otomatis NULL untuk baris lama. Jadi shiftId di ketiga tabel di
+        // bawah TIDAK menulis DEFAULT sama sekali.
+        //
+        // Untuk kolom NOT NULL (promoDiscount, purchasePriceSnapshot, isCash), klausa DEFAULT
+        // itu WAJIB secara sintaks SQLite (tidak bisa ADD COLUMN NOT NULL tanpa default kalau
+        // tabel sudah berisi baris) — literalnya sekarang dicocokkan persis lewat
+        // @ColumnInfo(defaultValue = ...) di entity (lihat TransactionEntity.kt/
+        // CustomerEntity.kt), supaya skema yang di-generate Room dari entity SAMA PERSIS dengan
+        // yang sungguh tersimpan di database setelah migrasi.
         db.execSQL("ALTER TABLE transaction_items ADD COLUMN promoDiscount REAL NOT NULL DEFAULT 0.0")
         db.execSQL("ALTER TABLE transaction_items ADD COLUMN purchasePriceSnapshot REAL NOT NULL DEFAULT 0.0")
         db.execSQL(
@@ -285,14 +299,14 @@ val MIGRATION_15_16 = object : Migration(15, 16) {
             """.trimIndent()
         )
 
-        db.execSQL("ALTER TABLE transactions ADD COLUMN shiftId INTEGER DEFAULT NULL")
+        db.execSQL("ALTER TABLE transactions ADD COLUMN shiftId INTEGER")
         db.execSQL("CREATE INDEX IF NOT EXISTS index_transactions_shiftId ON transactions(shiftId)")
 
-        db.execSQL("ALTER TABLE transaction_returns ADD COLUMN shiftId INTEGER DEFAULT NULL")
+        db.execSQL("ALTER TABLE transaction_returns ADD COLUMN shiftId INTEGER")
         db.execSQL("CREATE INDEX IF NOT EXISTS index_transaction_returns_shiftId ON transaction_returns(shiftId)")
 
         db.execSQL("ALTER TABLE debt_payments ADD COLUMN isCash INTEGER NOT NULL DEFAULT 1")
-        db.execSQL("ALTER TABLE debt_payments ADD COLUMN shiftId INTEGER DEFAULT NULL")
+        db.execSQL("ALTER TABLE debt_payments ADD COLUMN shiftId INTEGER")
         db.execSQL("CREATE INDEX IF NOT EXISTS index_debt_payments_shiftId ON debt_payments(shiftId)")
     }
 }

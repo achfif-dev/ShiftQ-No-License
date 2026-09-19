@@ -1,5 +1,6 @@
 package com.example.posapp.data.local.entity
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
@@ -17,7 +18,10 @@ enum class PaymentMethod { CASH, DEBIT_CREDIT, QRIS, BON, MIXED } // MIXED = spl
             onDelete = ForeignKey.SET_NULL
         )
     ],
-    indices = [Index("customerId"), Index("invoiceNumber", unique = true)]
+    // v16: index shiftId ditambahkan di sini SUPAYA COCOK dengan CREATE INDEX yang dijalankan
+    // MIGRATION_15_16 — kalau tidak, Room menolak migrasi dengan "didn't properly handle" karena
+    // skema hasil migrasi punya index yang tidak dikenal skema hasil entity.
+    indices = [Index("customerId"), Index("invoiceNumber", unique = true), Index("shiftId")]
 )
 data class TransactionEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -92,12 +96,16 @@ data class TransactionItemEntity(
     // lebih besar dari yang benar-benar dibayar pelanggan. Disimpan di kolom SENDIRI (bukan
     // digabung ke itemDiscount) supaya laporan tetap bisa membedakan potongan yang diberikan
     // kasir secara manual dari potongan yang otomatis dari aturan promo.
+    // defaultValue WAJIB sama persis dengan literal "DEFAULT 0.0" di ALTER TABLE
+    // (MIGRATION_15_16) — kalau beda, Room menolak migrasi walau nilainya sama-sama nol.
+    @ColumnInfo(defaultValue = "0.0")
     val promoDiscount: Double = 0.0,
     // v16 — BUG AKUNTANSI SEBELUMNYA: laba kotor di-JOIN ke products.purchasePrice yang HIDUP,
     // jadi begitu Admin memperbarui harga beli, laba bulan-bulan yang sudah lewat ikut berubah
     // sendiri. Snapshot ini membekukan harga beli PADA SAAT transaksi terjadi, sama seperti
     // priceSnapshot membekukan harga jual. Baris lama hasil migrasi diisi dari harga beli yang
     // berlaku saat migrasi dijalankan (perkiraan terbaik yang tersedia — lihat MIGRATION_15_16).
+    @ColumnInfo(defaultValue = "0.0")
     val purchasePriceSnapshot: Double = 0.0
 ) {
     /** Nilai bersih baris ini SEPERTI YANG DIBAYAR pelanggan — sudah dikurangi diskon manual

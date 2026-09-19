@@ -1,5 +1,6 @@
 package com.example.posapp.data.local.entity
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -38,7 +39,8 @@ data class CustomerEntity(
             onDelete = androidx.room.ForeignKey.CASCADE
         )
     ],
-    indices = [Index("customerId")]
+    // v16: cocok dengan CREATE INDEX index_debt_payments_shiftId di MIGRATION_15_16.
+    indices = [Index("customerId"), Index("shiftId")]
 )
 data class DebtPaymentEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -49,6 +51,8 @@ data class DebtPaymentEntity(
      * "kas seharusnya" saat tutup shift. false = transfer/QRIS, tidak menyentuh laci.
      * Sebelumnya pelunasan piutang tidak pernah ikut dihitung di rekonsiliasi shift sama sekali,
      * sehingga kas fisik selalu tampak BERLEBIH sebesar pelunasan tunai yang diterima hari itu. */
+    // defaultValue WAJIB sama persis dengan literal "DEFAULT 1" di ALTER TABLE (MIGRATION_15_16).
+    @ColumnInfo(defaultValue = "1")
     val isCash: Boolean = true,
     /** v16: shift yang aktif saat pelunasan dicatat (null = tidak ada shift terbuka / baris lama). */
     val shiftId: Long? = null,

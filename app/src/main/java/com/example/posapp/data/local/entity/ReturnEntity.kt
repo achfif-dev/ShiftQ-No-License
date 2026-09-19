@@ -27,7 +27,8 @@ import androidx.room.PrimaryKey
             onDelete = ForeignKey.CASCADE
         )
     ],
-    indices = [Index("transactionId")]
+    // v16: cocok dengan CREATE INDEX index_transaction_returns_shiftId di MIGRATION_15_16.
+    indices = [Index("transactionId"), Index("shiftId")]
 )
 data class TransactionReturnEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
