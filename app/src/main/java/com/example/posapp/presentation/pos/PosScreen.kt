@@ -556,6 +556,7 @@ fun PosScreen(
             isProcessing = uiState.isProcessing,
             onApplyLoyaltyRedemption = viewModel::applyLoyaltyRedemption,
             onClearLoyaltyRedemption = viewModel::clearLoyaltyRedemption,
+            onQrisSettled = viewModel::rememberSettledQrisOrder,
             onDismiss = { showPaymentSheet = false },
             onConfirm = { payments, customerId -> viewModel.checkout(payments, customerId) }
         )
@@ -1145,6 +1146,9 @@ private fun PaymentModal(
     isProcessing: Boolean,
     onApplyLoyaltyRedemption: (CustomerEntity, Long) -> Unit = { _, _ -> },
     onClearLoyaltyRedemption: () -> Unit = {},
+    /** v16: dipanggil saat Midtrans mengonfirmasi QRIS Otomatis, membawa orderId-nya — dipakai
+     * ViewModel untuk menempelkan nomor invoice final ke dokumen pembayaran setelah checkout. */
+    onQrisSettled: (String) -> Unit = {},
     onDismiss: () -> Unit,
     onConfirm: (List<com.example.posapp.domain.usecase.PaymentSplit>, customerId: Long?) -> Unit
 ) {
@@ -1413,6 +1417,10 @@ private fun PaymentModal(
                                 val settledAmount = autoState.charge?.amount ?: dynamicAmount
                                 LaunchedEffect(autoState.status) {
                                     payments.add(com.example.posapp.domain.usecase.PaymentSplit(PaymentMethod.QRIS, settledAmount.toDouble()))
+                                    // v16: ingat orderId-nya supaya nomor invoice final bisa
+                                    // ditempelkan ke dokumen pembayaran Midtrans setelah checkout,
+                                    // untuk rekonsiliasi dashboard Midtrans vs Riwayat Penjualan.
+                                    onQrisSettled(autoOrderId)
                                 }
                             }
                             // v: audit ulang QRIS dinamis -- AMOUNT_MISMATCH TIDAK BOLEH jatuh ke
@@ -1489,9 +1497,29 @@ private fun PaymentModal(
                     }
                 }
                 Spacer(Modifier.height(8.dp))
+                if (selectedMethod != PaymentMethod.CASH) {
+                    Text(
+                        "Metode non-tunai dibatasi maksimal sisa tagihan — tidak bisa jadi sumber kembalian tunai.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(4.dp))
+                }
                 OutlinedButton(
                     onClick = {
-                        val amount = amountText.toDoubleOrNull()?.takeIf { it > 0 } ?: remaining
+                        val requested = amountText.toDoubleOrNull()?.takeIf { it > 0 } ?: remaining
+                        // CELAH FRAUD SEBELUMNYA: nominal untuk BON/QRIS/Debit bebas diketik dan
+                        // kelebihannya ditampilkan sebagai "Kembalian". Kasir bisa memasukkan Bon
+                        // Rp200rb untuk belanja Rp150rb lalu memberikan Rp50rb TUNAI RIIL dari
+                        // laci — uang keluar sungguhan, piutang pelanggan membengkak, dan tidak
+                        // ada jejak apa pun. Hanya CASH yang boleh melebihi sisa tagihan, karena
+                        // hanya tunai yang memang menghasilkan kembalian.
+                        val amount = if (selectedMethod == PaymentMethod.CASH) {
+                            requested
+                        } else {
+                            requested.coerceAtMost(remaining)
+                        }
+                        if (amount <= 0) return@OutlinedButton
                         payments.add(com.example.posapp.domain.usecase.PaymentSplit(selectedMethod, amount))
                         amountText = ""
                     },

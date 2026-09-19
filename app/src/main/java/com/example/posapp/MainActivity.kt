@@ -403,7 +403,13 @@ fun PosNavHost(sessionManager: SessionManager, autoLockManager: AutoLockManager)
         }
         composable("stock") {
             AuthGatedRoute(blocking = isAuthGateBlocking()) {
-                StockScreen(onBack = { navController.popBackStack() })
+                // Digerbang sejak v16 (audit): layar ini bisa menaikkan/menurunkan persediaan di
+                // luar alur penjualan, jadi setara Manajemen Produk — ADMIN & MANAGER saja.
+                val currentUser by sessionManager.currentUser.collectAsState()
+                val allowed = Permission.canAccessStock(currentUser, storeProfile.pinLoginEnabled)
+                RoleGatedRoute(allowed = allowed, navController = navController) {
+                    StockScreen(onBack = { navController.popBackStack() })
+                }
             }
         }
         composable("settings") {

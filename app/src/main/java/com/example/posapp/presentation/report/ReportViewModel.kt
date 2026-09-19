@@ -54,6 +54,12 @@ data class ReportUiState(
     val dailyTrend: List<DailyTrendPoint> = emptyList(), // tren omzet harian (grafik), lihat buildDailyTrend()
     val isAdmin: Boolean = false, // HANYA Admin: boleh koreksi harga/qty transaksi & Void — Manager tetap TIDAK termasuk ini
     val canViewExpenses: Boolean = false, // Admin & Manager: boleh lihat Laba Bersih & kelola Beban Usaha
+    /** v16 (audit): boleh melihat ANGKA BISNIS — omzet, laba kotor, tren harian, produk
+     * terlaris. Sebelumnya semua itu terbuka penuh untuk Kasir; yang disembunyikan cuma Laba
+     * Bersih. Ditegakkan di ViewModel (angkanya tidak dimuat sama sekali), bukan cuma
+     * disembunyikan di UI. Riwayat Penjualan SENGAJA tetap terbuka supaya Kasir masih bisa
+     * memproses retur — lihat Permission.canViewSalesAnalytics. */
+    val canViewAnalytics: Boolean = false,
     val isLoading: Boolean = false
 )
 
@@ -101,7 +107,12 @@ class ReportViewModel @Inject constructor(
         val currentUser = sessionManager.currentUser.value
         val isAdmin = currentUser == null || currentUser.role == UserRole.ADMIN
         val canViewExpenses = isAdmin || currentUser?.role == UserRole.MANAGER
-        _uiState.value = _uiState.value.copy(isAdmin = isAdmin, canViewExpenses = canViewExpenses)
+        val canViewAnalytics = canViewExpenses
+        _uiState.value = _uiState.value.copy(
+            isAdmin = isAdmin,
+            canViewExpenses = canViewExpenses,
+            canViewAnalytics = canViewAnalytics
+        )
         load()
     }
 
@@ -137,14 +148,20 @@ class ReportViewModel @Inject constructor(
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true)
             val state = _uiState.value
-            val summary = transactionRepository.getSalesSummary(state.startMillis, state.endMillis)
-            val topItems = transactionRepository.getTopSellingItems(state.startMillis, state.endMillis)
+            // Angka bisnis hanya dimuat kalau peran memang berhak — bukan dimuat lalu
+            // disembunyikan di UI (yang masih bocor lewat screenshot state/debug/deep link).
+            val summary = if (state.canViewAnalytics) {
+                transactionRepository.getSalesSummary(state.startMillis, state.endMillis)
+            } else DailySalesSummary(0.0, 0, 0.0)
+            val topItems = if (state.canViewAnalytics) {
+                transactionRepository.getTopSellingItems(state.startMillis, state.endMillis)
+            } else emptyList()
             val transactions = transactionRepository.observeRange(state.startMillis, state.endMillis).first()
             // Laba Bersih menyingkap struktur biaya toko — hanya dihitung untuk Admin & Manager.
             val totalExpenses = if (state.canViewExpenses) {
                 expenseRepository.getTotalForRange(state.startMillis, state.endMillis)
             } else 0.0
-            val dailyTrend = buildDailyTrend(transactions)
+            val dailyTrend = if (state.canViewAnalytics) buildDailyTrend(transactions) else emptyList()
             _uiState.value = _uiState.value.copy(
                 summary = summary,
                 topItems = topItems,

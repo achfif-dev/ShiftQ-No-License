@@ -1,6 +1,7 @@
 package com.example.posapp.domain.usecase
 
 import android.database.sqlite.SQLiteConstraintException
+import com.example.posapp.data.local.dao.ShiftDao
 import com.example.posapp.data.local.entity.PaymentMethod
 import com.example.posapp.data.local.entity.TransactionEntity
 import com.example.posapp.data.local.entity.TransactionItemEntity
@@ -35,7 +36,14 @@ class CheckoutUseCase @Inject constructor(
     private val transactionRepository: TransactionRepository,
     private val customerRepository: CustomerRepository,
     private val storeProfileRepository: StoreProfileRepository,
-    private val auditLogRepository: AuditLogRepository
+    private val auditLogRepository: AuditLogRepository,
+    /** Dipakai HANYA untuk mencatat `shiftId` transaksi (v16) — checkout TIDAK diblokir kalau
+     * tidak ada shift terbuka (banyak toko kecil memakai app ini tanpa pernah membuka shift;
+     * memblokir di sini akan mematikan kasir mereka sepenuhnya begitu update terpasang).
+     * Transaksi tanpa shift tersimpan dengan shiftId = null dan sengaja TIDAK ikut dihitung di
+     * rekonsiliasi shift mana pun — jauh lebih jujur daripada perilaku lama yang menyeret
+     * transaksi itu ke shift orang lain hanya karena waktunya kebetulan bersinggungan. */
+    private val shiftDao: ShiftDao
 ) {
     suspend operator fun invoke(
         cart: Cart,
@@ -59,20 +67,9 @@ class CheckoutUseCase @Inject constructor(
         val change = (totalPaid - cart.total).coerceAtLeast(0.0)
         val primaryMethod = if (validPayments.size == 1) validPayments.first().method else PaymentMethod.MIXED
 
-        val items = cart.lines.map { line ->
-            TransactionItemEntity(
-                transactionId = 0,
-                productId = line.product.id,
-                variantId = line.variant?.id,
-                variantLabelSnapshot = line.variant?.variantLabel,
-                productNameSnapshot = line.product.name + (line.variant?.let { " (${it.variantLabel})" } ?: ""),
-                priceSnapshot = line.unitPrice,
-                quantity = line.quantity,
-                unitSnapshot = line.product.unit,
-                itemDiscount = line.discount,
-                itemNote = line.note
-            )
-        }
+        val activeShiftId = runCatching { shiftDao.getActiveShift()?.id }.getOrNull()
+
+        val items = buildTransactionItems(cart)
 
         // dueDate (v15) hanya diisi untuk baris BON — dipakai Reminder Piutang Jatuh Tempo.
         // Diambil sekali di sini (bukan per baris) karena semua baris BON dalam satu transaksi
@@ -107,7 +104,8 @@ class CheckoutUseCase @Inject constructor(
                 changeAmount = change,
                 note = note,
                 cashierName = cashierName,
-                customerId = customerId
+                customerId = customerId,
+                shiftId = activeShiftId
             )
             try {
                 val txId = transactionRepository.checkout(transaction, items, paymentEntities)
@@ -188,7 +186,35 @@ class CheckoutUseCase @Inject constructor(
         )
     }
 
-    private companion object {
-        const val MAX_INVOICE_RETRY = 3
+    companion object {
+        private const val MAX_INVOICE_RETRY = 3
+
+        /**
+         * Pemetaan baris keranjang -> baris transaksi yang akan disimpan. SENGAJA dipisah jadi
+         * fungsi murni (tanpa database/DI) supaya bisa diuji langsung — di sinilah bug paling
+         * mahal di aplikasi ini pernah bersarang tanpa ketahuan: `promoDiscount` hilang saat
+         * pemetaan, sehingga jumlah nilai item tidak pernah sama dengan total yang dibayar
+         * pelanggan. Lihat CheckoutItemMappingTest.
+         */
+        fun buildTransactionItems(cart: Cart): List<TransactionItemEntity> = cart.lines.map { line ->
+            TransactionItemEntity(
+                transactionId = 0,
+                productId = line.product.id,
+                variantId = line.variant?.id,
+                variantLabelSnapshot = line.variant?.variantLabel,
+                productNameSnapshot = line.product.name + (line.variant?.let { " (${it.variantLabel})" } ?: ""),
+                priceSnapshot = line.unitPrice,
+                quantity = line.quantity,
+                unitSnapshot = line.product.unit,
+                itemDiscount = line.discount,
+                itemNote = line.note,
+                // v16 — perbaikan bug kritis: sebelumnya `line.promoDiscount` hilang total di
+                // sini (hanya `line.discount` yang ditulis).
+                promoDiscount = line.promoDiscount,
+                // v16: harga beli DIBEKUKAN di sini, bukan di-JOIN hidup ke products saat
+                // laporan dibuka. Varian memakai harga beli produk induknya.
+                purchasePriceSnapshot = line.product.purchasePrice
+            )
+        }
     }
 }

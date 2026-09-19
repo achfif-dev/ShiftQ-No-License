@@ -75,6 +75,33 @@ object Permission {
         return user?.role == UserRole.ADMIN || user?.role == UserRole.MANAGER
     }
 
+    /**
+     * Melihat ANGKA BISNIS di layar Laporan: total omzet, laba, tren harian, produk terlaris,
+     * dan rekap metode pembayaran. ADMIN & MANAGER saja.
+     *
+     * CATATAN PENTING — ini SENGAJA bukan gerbang rute. Layar Laporan juga memuat Riwayat
+     * Penjualan, dan dari situlah Kasir memproses RETUR (lihat [canProcessReturn] yang memang
+     * mengizinkan semua peran). Menggerbangi seluruh rute "reports" — seperti yang biasa
+     * disarankan saat audit — akan membuat kasir tidak bisa melayani retur sama sekali tanpa
+     * memanggil Admin, regresi operasional yang baru ketahuan setelah dipakai toko. Jadi yang
+     * ditutup hanya blok analitiknya, di ViewModel (bukan cuma disembunyikan di UI).
+     */
+    fun canViewSalesAnalytics(user: UserEntity?, pinLoginEnabled: Boolean): Boolean {
+        if (!pinLoginEnabled) return true
+        return user?.role == UserRole.ADMIN || user?.role == UserRole.MANAGER
+    }
+
+    /**
+     * Layar Stok (stok masuk/keluar/opname + riwayat penyesuaian, termasuk nilai persediaan).
+     * ADMIN & MANAGER — setara Manajemen Produk, karena layar ini bisa mengubah jumlah
+     * persediaan tanpa melewati transaksi penjualan. Opname sendiri tetap ADMIN-only lewat
+     * [canPerformStockOpname]. Sebelumnya rute "stock" tidak digerbang sama sekali.
+     */
+    fun canAccessStock(user: UserEntity?, pinLoginEnabled: Boolean): Boolean {
+        if (!pinLoginEnabled) return true
+        return user?.role == UserRole.ADMIN || user?.role == UserRole.MANAGER
+    }
+
     private fun isAdminOrPinDisabled(user: UserEntity?, pinLoginEnabled: Boolean): Boolean {
         if (!pinLoginEnabled) return true
         return user?.role == UserRole.ADMIN

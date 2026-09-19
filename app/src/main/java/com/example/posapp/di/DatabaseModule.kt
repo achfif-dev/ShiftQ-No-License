@@ -40,7 +40,8 @@ object DatabaseModule {
                 com.example.posapp.data.local.MIGRATION_11_12,
                 com.example.posapp.data.local.MIGRATION_12_13,
                 com.example.posapp.data.local.MIGRATION_13_14,
-                com.example.posapp.data.local.MIGRATION_14_15
+                com.example.posapp.data.local.MIGRATION_14_15,
+                com.example.posapp.data.local.MIGRATION_15_16
             )
             // Hanya untuk skenario downgrade (mis. pasang ulang APK versi lama secara tidak
             // sengaja) — kasus langka yang aman diberi fallback destruktif karena versi

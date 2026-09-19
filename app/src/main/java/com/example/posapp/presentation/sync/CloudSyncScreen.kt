@@ -33,6 +33,31 @@ fun CloudSyncScreen(
     val profile by viewModel.profile.collectAsState()
     var outletName by remember(profile.outletName) { mutableStateOf(profile.outletName) }
     var groupCodeInput by remember(profile.syncGroupCode) { mutableStateOf(profile.syncGroupCode) }
+    var showRegenerateConfirm by remember { mutableStateOf(false) }
+
+    if (showRegenerateConfirm) {
+        AlertDialog(
+            onDismissRequest = { showRegenerateConfirm = false },
+            title = { Text("Buat Ulang ID Cabang?") },
+            text = {
+                Text(
+                    "Gunakan ini HANYA kalau sinkronisasi ditolak dengan pesan \"device sudah " +
+                        "terdaftar di instalasi lain\".\n\nData lokal (produk, transaksi, stok) TIDAK " +
+                        "terhapus sama sekali. Tapi cabang ini akan muncul sebagai entri BARU di " +
+                        "Ringkasan Semua Cabang — entri lama tidak ikut berpindah."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.regenerateOutletId()
+                    showRegenerateConfirm = false
+                }) { Text("Buat Ulang") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRegenerateConfirm = false }) { Text("Batal") }
+            }
+        )
+    }
     val isConfigured = remember { viewModel.isCloudConfigured() }
     val clipboard = LocalClipboardManager.current
 
@@ -122,6 +147,14 @@ fun CloudSyncScreen(
                 onClick = { viewModel.updateSyncGroupCode(groupCodeInput) },
                 enabled = groupCodeInput.isNotBlank() && groupCodeInput != profile.syncGroupCode
             ) { Text("Simpan Kode Grup") }
+
+            Spacer(Modifier.height(12.dp))
+            // v16: pemulihan mandiri kalau identitas sinkronisasi device ini ditolak server
+            // ("sudah terdaftar di instalasi lain") — mis. setelah data app dihapus atau HP
+            // diganti. Tanpa tombol ini pemilik toko wajib menghubungi developer.
+            TextButton(onClick = { showRegenerateConfirm = true }) {
+                Text("Buat Ulang ID Cabang (kalau sinkronisasi ditolak)")
+            }
 
             Spacer(Modifier.height(16.dp))
             HorizontalDivider()

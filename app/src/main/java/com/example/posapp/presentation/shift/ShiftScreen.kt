@@ -493,6 +493,32 @@ private fun ShiftClosedSummaryDialog(
                     BreakdownRow("Kas Masuk", breakdown.cashInFromMovements)
                     BreakdownRow("Kas Keluar", -breakdown.cashOutFromMovements)
                 }
+                // v16 (audit): dua aliran kas yang SEBELUMNYA tidak pernah masuk hitungan sama
+                // sekali — refund tunai keluar laci, dan pelunasan piutang tunai masuk laci.
+                if (breakdown.cashRefunds > 0 || breakdown.cashDebtPayments > 0) {
+                    Spacer(Modifier.height(8.dp))
+                    HorizontalDivider()
+                    Spacer(Modifier.height(8.dp))
+                    Text("Kas Lain di Luar Penjualan", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(4.dp))
+                    if (breakdown.cashDebtPayments > 0) {
+                        BreakdownRow("Pelunasan Piutang (tunai)", breakdown.cashDebtPayments)
+                    }
+                    if (breakdown.cashRefunds > 0) {
+                        BreakdownRow("Refund Retur/Void (tunai)", -breakdown.cashRefunds)
+                    }
+                }
+                if (breakdown.transactionsWithoutShift > 0) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "⚠ ${breakdown.transactionsWithoutShift} transaksi terjadi pada rentang waktu " +
+                            "shift ini TAPI dibuat saat tidak ada shift terbuka, jadi TIDAK ikut " +
+                            "dihitung di kas seharusnya. Selisih yang muncul kemungkinan besar " +
+                            "berasal dari situ, bukan dari kesalahan kasir.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Tutup") } }

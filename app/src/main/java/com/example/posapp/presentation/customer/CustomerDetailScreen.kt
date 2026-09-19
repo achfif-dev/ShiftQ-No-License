@@ -103,8 +103,8 @@ fun CustomerDetailScreen(
         RecordPaymentDialog(
             maxAmount = detail?.debtBalance ?: 0.0,
             onDismiss = { showPaymentDialog = false },
-            onConfirm = { amount, note ->
-                viewModel.recordPayment(amount, note)
+            onConfirm = { amount, note, isCash ->
+                viewModel.recordPayment(amount, note, isCash)
                 showPaymentDialog = false
             }
         )
@@ -129,10 +129,13 @@ private fun PaymentRow(payment: DebtPaymentEntity) {
 private fun RecordPaymentDialog(
     maxAmount: Double,
     onDismiss: () -> Unit,
-    onConfirm: (amount: Double, note: String) -> Unit
+    onConfirm: (amount: Double, note: String, isCash: Boolean) -> Unit
 ) {
     var amountText by remember { mutableStateOf(maxAmount.takeIf { it > 0 }?.toLong()?.toString() ?: "") }
     var note by remember { mutableStateOf("") }
+    // v16: menentukan apakah uang ini benar-benar masuk laci kasir. Dipakai rekonsiliasi shift —
+    // pelunasan tunai MENAMBAH "kas seharusnya", transfer/QRIS tidak.
+    var isCash by remember { mutableStateOf(true) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -159,11 +162,27 @@ private fun RecordPaymentDialog(
                     label = { Text("Catatan (opsional)") },
                     modifier = Modifier.fillMaxWidth()
                 )
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = isCash, onCheckedChange = { isCash = it })
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        "Diterima tunai (masuk laci kasir)",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                if (!isCash) {
+                    Text(
+                        "Pelunasan non-tunai tidak menambah kas laci saat tutup shift.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
         },
         confirmButton = {
             TextButton(
-                onClick = { onConfirm(amountText.toDoubleOrNull() ?: 0.0, note) },
+                onClick = { onConfirm(amountText.toDoubleOrNull() ?: 0.0, note, isCash) },
                 enabled = (amountText.toDoubleOrNull() ?: 0.0) > 0
             ) { Text("Simpan") }
         },

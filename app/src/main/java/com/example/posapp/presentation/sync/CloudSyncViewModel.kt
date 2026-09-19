@@ -46,6 +46,12 @@ class CloudSyncViewModel @Inject constructor(
 
     /** @param code Kode grup baru — isi manual untuk BERGABUNG ke grup cabang lain (salin persis
      * dari cabang utama), atau kosongkan untuk membuat kode acak baru (mis. keluar dari grup lama). */
+    /** v16: pemulihan mandiri kalau identitas sinkronisasi device ini sudah diklaim instalasi
+     * lain — lihat StoreProfileRepository.regenerateOutletId untuk konsekuensinya. */
+    fun regenerateOutletId() {
+        viewModelScope.launch { storeProfileRepository.regenerateOutletId() }
+    }
+
     fun updateSyncGroupCode(code: String) {
         viewModelScope.launch { storeProfileRepository.updateSyncGroupCode(code) }
     }

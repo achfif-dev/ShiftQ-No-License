@@ -85,8 +85,19 @@ class PosViewModel @Inject constructor(
     private val customerRepository: CustomerRepository,
     private val cloudSyncRepository: CloudSyncRepository,
     private val promoRepository: PromoRepository,
-    private val parkedSaleRepository: ParkedSaleRepository
+    private val parkedSaleRepository: ParkedSaleRepository,
+    private val paymentGatewayRepository: com.example.posapp.data.payment.PaymentGatewayRepository
 ) : ViewModel() {
+
+    /** orderId QRIS Otomatis yang statusnya sudah SETTLED untuk keranjang yang sedang berjalan
+     * (v16). Disimpan sementara supaya setelah checkout berhasil, nomor invoice final bisa
+     * ditempelkan ke dokumen pembayaran di server — lihat PaymentGatewayRepository.attachInvoice. */
+    private var settledQrisOrderId: String? = null
+
+    /** Dipanggil PosScreen saat Midtrans mengonfirmasi pembayaran QRIS Otomatis. */
+    fun rememberSettledQrisOrder(orderId: String) {
+        settledQrisOrderId = orderId
+    }
 
     private val _searchQuery = MutableStateFlow("")
     private val _selectedCategoryId = MutableStateFlow<Long?>(null)
@@ -432,6 +443,10 @@ class PosViewModel @Inject constructor(
                     customerId = customerId, actorRole = actorRole
                 )) {
                     is CheckoutResult.Success -> {
+                        settledQrisOrderId?.let { orderId ->
+                            paymentGatewayRepository.attachInvoice(orderId, result.invoiceNumber)
+                            settledQrisOrderId = null
+                        }
                         _lastReceipt.value = transactionRepository.getTransactionWithItems(result.transactionId)
                         _events.emit(PosEvent.CheckoutSuccess(result.transactionId, result.invoiceNumber, result.change))
                         clearCart()

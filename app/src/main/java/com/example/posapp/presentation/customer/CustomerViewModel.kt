@@ -67,9 +67,9 @@ class CustomerDetailViewModel @Inject constructor(
     private val _events = MutableSharedFlow<CustomerEvent>()
     val events: SharedFlow<CustomerEvent> = _events
 
-    fun recordPayment(amount: Double, note: String) {
+    fun recordPayment(amount: Double, note: String, isCash: Boolean = true) {
         viewModelScope.launch {
-            when (val result = customerRepository.recordPayment(customerId, amount, note)) {
+            when (val result = customerRepository.recordPayment(customerId, amount, note, isCash)) {
                 is RecordPaymentResult.Success -> _events.emit(CustomerEvent.ShowMessage("Pelunasan dicatat"))
                 is RecordPaymentResult.Error -> _events.emit(CustomerEvent.ShowMessage(result.message))
             }

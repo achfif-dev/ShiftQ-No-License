@@ -120,27 +120,32 @@ fun ReportScreen(
                     Spacer(Modifier.height(16.dp))
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // v16 (audit): angka bisnis hanya untuk Admin & Manager. Kasir tetap masuk ke
+                // layar ini karena Riwayat Penjualan di bawah adalah tempat memproses RETUR —
+                // yang memang boleh dilakukan Kasir (Permission.canProcessReturn).
+                if (uiState.canViewAnalytics) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        SummaryCard(
+                            modifier = Modifier.weight(1f),
+                            label = "Total Omzet (tanpa PPN)",
+                            value = rupiah.format(uiState.summary.totalRevenue),
+                            accent = MaterialTheme.colorScheme.primary
+                        )
+                        SummaryCard(
+                            modifier = Modifier.weight(1f),
+                            label = "Laba Kotor",
+                            value = rupiah.format(uiState.summary.totalGrossProfit),
+                            accent = MaterialTheme.colorScheme.tertiary
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
                     SummaryCard(
-                        modifier = Modifier.weight(1f),
-                        label = "Total Omzet",
-                        value = rupiah.format(uiState.summary.totalRevenue),
-                        accent = MaterialTheme.colorScheme.primary
-                    )
-                    SummaryCard(
-                        modifier = Modifier.weight(1f),
-                        label = "Laba Kotor",
-                        value = rupiah.format(uiState.summary.totalGrossProfit),
-                        accent = MaterialTheme.colorScheme.tertiary
+                        modifier = Modifier.fillMaxWidth(),
+                        label = "Jumlah Transaksi",
+                        value = "${uiState.summary.totalTransactions}",
+                        accent = MaterialTheme.colorScheme.secondary
                     )
                 }
-                Spacer(Modifier.height(8.dp))
-                SummaryCard(
-                    modifier = Modifier.fillMaxWidth(),
-                    label = "Jumlah Transaksi",
-                    value = "${uiState.summary.totalTransactions}",
-                    accent = MaterialTheme.colorScheme.secondary
-                )
 
                 // Fitur (saran audit kompetitif): grafik tren omzet harian, memakai
                 // uiState.dailyTrend yang sudah dihitung di ReportViewModel — supaya pemilik
@@ -204,12 +209,16 @@ fun ReportScreen(
                     }
                 }
 
-                Spacer(Modifier.height(24.dp))
-                Text("Produk Terlaris", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(8.dp))
+                if (uiState.canViewAnalytics) {
+                    Spacer(Modifier.height(24.dp))
+                    Text("Produk Terlaris", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(8.dp))
+                }
             }
 
-            if (uiState.topItems.isEmpty()) {
+            if (!uiState.canViewAnalytics) {
+                // tidak menampilkan apa pun — daftar produk terlaris juga angka bisnis
+            } else if (uiState.topItems.isEmpty()) {
                 item {
                     Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), contentAlignment = Alignment.Center) {
                         Text("Belum ada penjualan pada periode ini", color = MaterialTheme.colorScheme.onSurfaceVariant)
